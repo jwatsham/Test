@@ -1,0 +1,885 @@
+<title>Rhythm Chiropractor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Nunito:wght@800&display=swap">
+<style>
+/* Layout: one full-viewport canvas; a fixed 720x1280 portrait world is letterboxed inside it. */
+:root {
+  --bg: #1f1a29;        /* letterbox plum, same as the game's outline ink */
+  --fg: #fff6d5;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+#game { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
+</style>
+
+<canvas id="game" tabindex="0" aria-label="Rhythm Chiropractor game. Tap or press Space on the beat."></canvas>
+
+<script>
+"use strict";
+// ============================================================================
+// Rhythm Chiropractor (web / portrait). Port of the Godot prototype.
+// All art is drawn on a canvas and all audio is synthesized at load time.
+// ============================================================================
+
+const W = 720, H = 1280;
+const HIT_X = 200, BELT_Y = 1000, PPB = 160, SPAWN_AHEAD = 760;
+const WIN_PERFECT = 0.050, WIN_GREAT = 0.100, WIN_OK = 0.160;
+const OUT = "#1f1a29";
+const DISPLAY = '"Lilita One", "Arial Black", Impact, sans-serif';
+const BODY = 'Nunito, "Arial Rounded MT Bold", "Helvetica Neue", Arial, sans-serif';
+const TAU = Math.PI * 2;
+const AUTOPLAY = location.hash === "#autoplay";
+
+// ---------------------------------------------------------------- storage --
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("rc_" + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem("rc_" + k, JSON.stringify(v)); } catch (e) {} },
+};
+let offsetMs = store.get("offset", 0);
+let bestScore = store.get("best", 0);
+
+// ------------------------------------------------------------------ level --
+const LEVEL = {
+  title: "Monday Morning Adjustments",
+  bpm: 108, seed: 7, introBars: 2,
+  arrangement: "count count a a a a b b b b b b b b c c c c c c c c b b b b c c c c end end".split(" "),
+  chart: [
+    "x...", "x...", "x.x.", "x.x.",
+    "x.x.", "x.x.", "xxx.", "x.x.",
+    "x.xx", "x.x.", "xxx.", "xxxx",
+    "d...", "x.d.", "d.x.", "x.x.",
+    "d.d.", "xx.x", "d.xx", "xxxx",
+    "x.x.", "d.x.", "xxd.", "d.d.",
+    "xxxx", "d.xd", "xdx.", "d...",
+  ],
+};
+
+// ================================================================== SYNTH ==
+const RATE = 22050;
+let _seed = 42;
+const rnd = () => ((_seed = (_seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+const nz = () => rnd() * 2 - 1;
+const midi = n => 440 * Math.pow(2, (n - 69) / 12);
+const ROOTS = [36, 36, 41, 43];
+const BASS_A = [0, null, null, 0, null, null, 12, null];
+const BASS_B = [0, null, 12, 0, null, 0, 7, 12];
+const KAZOO = [12, 12, 10, 7, null, 7, 10, 12];
+
+function kick(b, at, vol = 0.9) {
+  let ph = 0; const n = 0.3 * RATE | 0;
+  for (let i = 0; i < n && at + i < b.length; i++) {
+    const t = i / RATE; ph += TAU * (48 + 120 * Math.exp(-t * 30)) / RATE;
+    b[at + i] += Math.sin(ph) * Math.exp(-t * 10) * vol;
+  }
+}
+function snare(b, at, vol = 0.45) {
+  const n = 0.2 * RATE | 0;
+  for (let i = 0; i < n && at + i < b.length; i++) {
+    const t = i / RATE;
+    b[at + i] += (nz() * Math.exp(-t * 22) * 0.8 + Math.sin(TAU * 185 * t) * Math.exp(-t * 30) * 0.5) * vol;
+  }
+}
+function hat(b, at, vol = 0.16) {
+  let prev = 0; const n = 0.05 * RATE | 0;
+  for (let i = 0; i < n && at + i < b.length; i++) {
+    const t = i / RATE, x = nz();
+    b[at + i] += (x - prev) * Math.exp(-t * 90) * vol; prev = x;
+  }
+}
+function woodblock(b, at, f = 1200, vol = 0.4) {
+  const n = 0.08 * RATE | 0;
+  for (let i = 0; i < n && at + i < b.length; i++) {
+    const t = i / RATE; b[at + i] += Math.sin(TAU * f * t) * Math.exp(-t * 55) * vol;
+  }
+}
+function bass(b, at, note, len, vol = 0.32) {
+  const f = midi(note); let ph = 0; const n = len * RATE | 0, rel = 0.03 * RATE;
+  for (let i = 0; i < n + rel && at + i < b.length; i++) {
+    const t = i / RATE; ph += TAU * f * (1 + 0.6 * Math.exp(-t * 35)) / RATE;
+    let env = Math.min(t * 300, 1) * Math.exp(-t * 4);
+    if (i > n) env *= 1 - (i - n) / rel;
+    b[at + i] += Math.tanh(Math.sin(ph) * 2.5) * env * vol;
+  }
+}
+function kazoo(b, at, note, len, vol = 0.13) {
+  const f = midi(note); let ph = 0, lp = 0; const n = len * RATE | 0;
+  for (let i = 0; i < n && at + i < b.length; i++) {
+    const t = i / RATE; ph += f * (1 + 0.015 * Math.sin(TAU * 6 * t)) / RATE;
+    lp += ((ph % 1) * 2 - 1 - lp) * 0.3;
+    b[at + i] += lp * Math.min(t * 50, 1) * Math.min((n - i) / (0.03 * RATE), 1) * vol;
+  }
+}
+function renderBar(v, root, spbS) {
+  const b = new Float32Array(Math.round(spbS * 4)); const e = spbS / 2, eSec = e / RATE;
+  if (v === "count") {
+    for (let k = 0; k < 4; k++) { woodblock(b, k * spbS | 0, k === 0 ? 1500 : 1100); hat(b, (k + 0.5) * spbS | 0, 0.08); }
+  } else if (v === "a") {
+    kick(b, 0); kick(b, 2 * spbS | 0);
+    for (let s = 0; s < 8; s++) { hat(b, s * e | 0); if (BASS_A[s] !== null) bass(b, s * e | 0, root + BASS_A[s], eSec * 0.9); }
+  } else if (v === "b" || v === "c") {
+    for (let k = 0; k < 4; k++) { kick(b, k * spbS | 0, k % 2 ? 0.6 : 0.85); if (k % 2) snare(b, k * spbS | 0); }
+    for (let s = 0; s < 8; s++) {
+      hat(b, s * e | 0, s % 2 ? 0.2 : 0.12);
+      if (BASS_B[s] !== null) bass(b, s * e | 0, root + BASS_B[s], eSec * 0.85);
+      if (v === "c" && KAZOO[s] !== null) kazoo(b, s * e | 0, root + 24 + KAZOO[s], eSec * 0.9);
+    }
+  } else if (v === "end") {
+    kick(b, 0); snare(b, 0, 0.6); bass(b, 0, 36, spbS * 2 / RATE);
+  }
+  return b;
+}
+function buildSong(bpm, arr) {
+  _seed = 42;
+  const barLen = Math.round(60 / bpm * RATE * 4), spbS = barLen / 4;
+  const out = new Float32Array(barLen * arr.length), cache = {};
+  arr.forEach((v, i) => {
+    const root = ROOTS[i % 4], key = v + root;
+    if (!cache[key]) cache[key] = renderBar(v, root, spbS);
+    out.set(cache[key], i * barLen);
+  });
+  return { data: out, spb: spbS / RATE };
+}
+function sfxCrack() {
+  const b = new Float32Array(0.25 * RATE | 0);
+  for (const c of [0, 0.016, 0.037, 0.065]) {
+    const s = c * RATE | 0;
+    for (let i = 0; i < 0.03 * RATE; i++) b[s + i] += nz() * Math.exp(-(i / RATE) * 350) * 0.9;
+  }
+  for (let i = 0; i < b.length; i++) { const t = i / RATE; b[i] += Math.sin(TAU * 110 * t) * Math.exp(-t * 25) * 0.5; }
+  return b;
+}
+function sfxWomp() {
+  const b = new Float32Array(0.7 * RATE | 0); let ph = 0;
+  for (let i = 0; i < b.length; i++) {
+    const t = i / RATE; let f = t < 0.25 ? 311 : 233 - (t - 0.25) * 60;
+    f *= 1 + 0.02 * Math.sin(TAU * 7 * t); ph += TAU * f / RATE;
+    let env = Math.min(t * 40, 1) * Math.min((0.7 - t) * 8, 1);
+    if (Math.abs(t - 0.25) < 0.02) env *= 0.3;
+    b[i] = Math.tanh(Math.sin(ph) * 3) * env * 0.3;
+  }
+  return b;
+}
+function sfxWhiff() {
+  const b = new Float32Array(0.16 * RATE | 0); let lp = 0;
+  for (let i = 0; i < b.length; i++) { const t = i / RATE; lp += (nz() - lp) * (0.1 + t * 3); b[i] = lp * Math.sin(Math.PI * t / 0.16) * 0.5; }
+  return b;
+}
+function sfxBoing() {
+  const b = new Float32Array(0.35 * RATE | 0); let ph = 0;
+  for (let i = 0; i < b.length; i++) {
+    const t = i / RATE; ph += TAU * (220 + 380 * t / 0.35 + 40 * Math.sin(TAU * 18 * t)) / RATE;
+    b[i] = Math.sin(ph) * Math.exp(-t * 6) * 0.35;
+  }
+  return b;
+}
+
+// Render everything up front (fast in JS); AudioBuffers are made on first tap.
+const RAW = {
+  song: buildSong(LEVEL.bpm, LEVEL.arrangement),
+  title: buildSong(LEVEL.bpm, ["b", "b", "c", "c"]),
+  crack: sfxCrack(), womp: sfxWomp(), whiff: sfxWhiff(), boing: sfxBoing(),
+};
+
+// ================================================================== AUDIO ==
+let actx = null, master = null;
+const BUF = {};
+function toBuffer(data) {
+  const b = actx.createBuffer(1, data.length, RATE);
+  const ch = b.getChannelData(0);
+  for (let i = 0; i < data.length; i++) ch[i] = Math.max(-1, Math.min(1, data[i]));
+  return b;
+}
+function unlockAudio() {
+  // Play through the iPhone silent switch where Safari supports it.
+  try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch (e) {}
+  if (!actx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    actx = new AC({ latencyHint: "interactive" });
+    master = actx.createGain(); master.gain.value = 0.9; master.connect(actx.destination);
+    for (const k of ["crack", "womp", "whiff", "boing"]) BUF[k] = toBuffer(RAW[k]);
+    BUF.song = toBuffer(RAW.song.data);
+    BUF.title = toBuffer(RAW.title.data);
+    // Prime the output with a silent blip (older iOS needs a sound started in the gesture).
+    const s = actx.createBufferSource(); s.buffer = actx.createBuffer(1, 1, RATE); s.connect(master); s.start();
+  }
+  if (actx.state !== "running") actx.resume().catch(() => {});
+}
+function playBuf(name, rate = 1, vol = 1, loop = false, when = 0) {
+  if (!actx || !BUF[name]) return null;
+  const src = actx.createBufferSource(); src.buffer = BUF[name]; src.loop = loop;
+  src.playbackRate.value = rate;
+  const g = actx.createGain(); g.gain.value = vol; src.connect(g); g.connect(master);
+  src.start(when || 0);
+  return src;
+}
+// Context time of the sample being heard at performance-time `perfMs`.
+function audioHeardAt(perfMs) {
+  if (actx.getOutputTimestamp) {
+    const ts = actx.getOutputTimestamp();
+    if (ts.contextTime > 0 && ts.performanceTime > 0) {
+      const now = perfMs === undefined ? performance.now() : perfMs;
+      return ts.contextTime + (now - ts.performanceTime) / 1000;
+    }
+  }
+  return actx.currentTime - (actx.outputLatency || actx.baseLatency || 0);
+}
+
+// ================================================================ DRAWING ==
+const cv = document.getElementById("game");
+const c = cv.getContext("2d");
+let view = { s: 1, ox: 0, oy: 0, dpr: 1 };
+function resize() {
+  const r = cv.getBoundingClientRect();
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+  cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+  const s = Math.min(r.width / W, r.height / H);
+  view = { s, ox: (r.width - W * s) / 2, oy: (r.height - H * s) / 2, dpr };
+}
+window.addEventListener("resize", resize);
+
+function circle(x, y, r, col) { c.beginPath(); c.arc(x, y, Math.max(r, 0), 0, TAU); c.fillStyle = col; c.fill(); }
+function ellipse(x, y, rx, ry, col) { c.beginPath(); c.ellipse(x, y, rx, ry, 0, 0, TAU); c.fillStyle = col; c.fill(); }
+function line(x1, y1, x2, y2, col, w, cap = "round") {
+  c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.strokeStyle = col; c.lineWidth = w; c.lineCap = cap; c.stroke();
+}
+function poly(pts, col) { c.beginPath(); c.moveTo(pts[0], pts[1]); for (let i = 2; i < pts.length; i += 2) c.lineTo(pts[i], pts[i + 1]); c.closePath(); c.fillStyle = col; c.fill(); }
+function polyline(pts, col, w) {
+  c.beginPath(); c.moveTo(pts[0], pts[1]); for (let i = 2; i < pts.length; i += 2) c.lineTo(pts[i], pts[i + 1]);
+  c.strokeStyle = col; c.lineWidth = w; c.lineCap = "round"; c.lineJoin = "round"; c.stroke();
+}
+function arc(x, y, r, a0, a1, col, w) { c.beginPath(); c.arc(x, y, r, a0, a1); c.strokeStyle = col; c.lineWidth = w; c.lineCap = "round"; c.stroke(); }
+function rect(x, y, w, h, col) { c.fillStyle = col; c.fillRect(x, y, w, h); }
+function rrect(x, y, w, h, r, col) { c.beginPath(); c.roundRect ? c.roundRect(x, y, w, h, r) : c.rect(x, y, w, h); c.fillStyle = col; c.fill(); }
+function text(s, x, y, size, col, o = {}) {
+  c.font = `${size}px ${o.font || DISPLAY}`;
+  c.textAlign = o.align || "left"; c.textBaseline = o.base || "alphabetic";
+  const ow = o.outline === undefined ? size * 0.2 : o.outline;
+  if (ow > 0) { c.lineJoin = "round"; c.lineWidth = ow; c.strokeStyle = OUT; c.strokeText(s, x, y); }
+  c.fillStyle = col; c.fillText(s, x, y);
+}
+
+// ------------------------------------------------------------- background --
+function drawBackground(scroll, pulse, posters) {
+  rect(0, 0, W, 860, pulse > 0 ? mix("#f4d9c6", "#ffe8d6", pulse * 0.4) : "#f4d9c6");
+  for (let x = 0; x < W; x += 80) rect(x, 0, 40, 860, "rgba(255,255,255,0.18)");
+  rect(0, 860, W, 140, "#7fb7a4");
+  rect(0, 854, W, 10, "#5e8f7e");
+  if (posters) {
+    frame(36, 190, 180, 120, "#fff6d5", ["DEFINITELY", "A REAL", "DEGREE"], 20);
+    frame(500, 176, 180, 140, "#d5ecff", ["SPINES", "R US"], 34);
+    frame(452, 392, 230, 104, "#ffd6e0", ["TODAY ONLY:", "1 FREE CRACK", "(no refunds)"], 19);
+    const cx = 358, cy = 250;
+    circle(cx, cy, 44, OUT); circle(cx, cy, 39, "#fff");
+    const a = -Math.PI / 2 + scroll * 0.004;
+    line(cx, cy, cx + Math.cos(a) * 30, cy + Math.sin(a) * 30, OUT, 3);
+    line(cx, cy, cx + Math.cos(a * 0.1) * 20, cy + Math.sin(a * 0.1) * 20, OUT, 5);
+    text("CRACK O'CLOCK", cx, cy + 68, 13, OUT, { align: "center", outline: 0, font: BODY });
+  }
+  rect(0, 1044, W, H - 1044, "#b98b62");
+  for (const y of [1110, 1180, 1250]) rect(0, y, W, 2, "#9c7350");
+  for (let x = 40; x < W; x += 160) rect(x - 8, BELT_Y + 40, 16, 80, "#555566");
+  rect(0, BELT_Y - 4, W, 52, OUT);
+  rect(0, BELT_Y, W, 44, "#3b3b46");
+  const off = ((-scroll % 60) + 60) % 60;
+  for (let i = 0; i < 16; i++) { const x = off + i * 60 - 60; line(x, BELT_Y + 4, x + 20, BELT_Y + 40, "#55556a", 6, "butt"); }
+  rect(0, BELT_Y, W, 5, "#6b6b80");
+  for (let x = 20; x < W; x += 80) {
+    const cy = BELT_Y + 44; circle(x, cy, 10, OUT); circle(x, cy, 7, "#9a9aac");
+    const a = -scroll / 10; line(x, cy, x + Math.cos(a) * 7, cy + Math.sin(a) * 7, OUT, 2);
+  }
+}
+function frame(x, y, w, h, col, lines, size) {
+  rect(x - 8, y - 8, w + 16, h + 16, "#8c5a2b");
+  c.strokeStyle = OUT; c.lineWidth = 3; c.strokeRect(x - 8, y - 8, w + 16, h + 16);
+  rect(x, y, w, h, col);
+  let ty = y + (h - lines.length * (size + 6)) / 2 + size;
+  for (const l of lines) { text(l, x + w / 2, ty, size, OUT, { align: "center", outline: 0, font: BODY }); ty += size + 6; }
+}
+function mix(a, b, t) {
+  const pa = parseInt(a.slice(1), 16), pb = parseInt(b.slice(1), 16);
+  const ch = s => [(s >> 16) & 255, (s >> 8) & 255, s & 255];
+  const A = ch(pa), B = ch(pb);
+  return `rgb(${A.map((v, i) => Math.round(v + (B[i] - v) * t)).join(",")})`;
+}
+
+// ---------------------------------------------------------------- patients --
+const ROSTER = [
+  { name: "Gary from Accounting", head: "human", hair: "short", hairColor: "#5b3a1e", skin: "#f1c27d", body: "#4a78c2", legsColor: "#2f2f3a", height: 130, width: 46, legs: 34, shape: "C", amp: 38, arms: true, hits: 1 },
+  { name: "Grandma Edna", head: "human", hair: "bun", hairColor: "#d8d8e0", glasses: true, skin: "#f5d0b0", body: "#e58fb5", legsColor: "#6d5a7a", height: 115, width: 44, legs: 28, shape: "C", amp: 52, arms: true, hits: 1 },
+  { name: "Sir Barks-a-Lot", head: "dog", skin: "#b7793f", body: "#b7793f", legsColor: "#8a5a2b", height: 95, width: 48, legs: 26, shape: "S", amp: 30, arms: true, hits: 1 },
+  { name: "Mr. Whiskers", head: "cat", skin: "#f29b38", body: "#f29b38", legsColor: "#d9822b", height: 90, width: 42, legs: 22, shape: "S", amp: 34, arms: true, hits: 1 },
+  { name: "A Banana", head: "banana", skin: "#ffe135", body: "#ffe135", height: 150, width: 42, legs: 0, shape: "arc", amp: 60, taper: 0.5, hits: 1 },
+  { name: "Robo-Bob 3000", head: "robot", skin: "#a9b4c2", body: "#a9b4c2", legsColor: "#6b7686", height: 120, width: 48, legs: 30, shape: "zig", amp: 26, arms: true, hits: 1 },
+  { name: "Gerald the Giraffe", head: "giraffe", skin: "#f2c14e", body: "#f2c14e", legsColor: "#d9a531", height: 220, width: 38, legs: 40, shape: "S", amp: 44, taper: 0.5, spots: true, hits: 2 },
+  { name: "Noodle the Snake", head: "snake", skin: "#6cc24a", body: "#6cc24a", height: 170, width: 30, legs: 0, shape: "wave", amp: 34, coil: true, hits: 2 },
+  { name: "A Desk Lamp", head: "lamp", skin: "#e04f5f", body: "#8d99ae", height: 160, width: 16, legs: 0, shape: "zig", amp: 40, base: true, hits: 2 },
+];
+const shapes = {
+  C: t => Math.sin(t * Math.PI) * 0.8 - t * t * 0.6,
+  S: t => Math.sin(t * TAU) * 0.8,
+  arc: t => Math.sin(t * Math.PI),
+  zig: t => Math.asin(Math.sin(t * 3 * Math.PI)) / (Math.PI / 2) * 0.7,
+  wave: t => Math.sin(t * 4 * Math.PI) * 0.6,
+};
+function shade(hex, amt) { return amt > 0 ? mix(hex, "#ffffff", amt) : mix(hex, "#000000", -amt); }
+
+class Patient {
+  constructor(d, anchor = 0) {
+    this.d = d; this.anchor = anchor; this.x = 2000;
+    this.start = 0.85 + Math.random() * 0.3; this.bend = this.start; this.target = this.start; this.vel = 0;
+    this.mood = 0; this.hop = 0; this.hopV = 0; this.squash = 0; this.wobble = 0;
+    this.t = Math.random() * 10; this.phase = 0; this.showName = true; this.dropY = 0;
+  }
+  adjust(rem) { this.target = this.start * rem; this.vel -= 16; this.squash = 0.35; }
+  celebrate() { this.mood = 1; this.hopV = 560; }
+  botch() { this.mood = 2; this.target = 1.6; this.vel += 10; this.wobble = 1; }
+  grabHeight() { return this.d.legs + this.d.height * 0.45; }
+  update(dt) {
+    this.t += dt;
+    this.vel += (this.target - this.bend) * 260 * dt; this.vel *= Math.exp(-9 * dt); this.bend += this.vel * dt;
+    if (this.hop > 0 || this.hopV > 0) { this.hopV -= 1800 * dt; this.hop = Math.max(this.hop + this.hopV * dt, 0); if (this.hop === 0) this.hopV = 0; }
+    this.squash = Math.max(this.squash - dt * 2, 0); this.wobble = Math.max(this.wobble - dt * 1.2, 0);
+  }
+  draw() {
+    const d = this.d, h = d.height, w = d.width, legs = d.legs || 0, taper = d.taper || 0;
+    c.save(); c.translate(this.x, BELT_Y + this.dropY);
+    ellipse(0, 2, w * 0.8 + 10, 7, "rgba(0,0,0,0.25)");
+    const bob = Math.pow(1 - this.phase, 3) * 0.05;
+    c.translate(Math.sin(this.t * 60) * 7 * this.wobble, -this.hop);
+    c.scale(1 + this.squash * 0.5 + bob, 1 - this.squash * 0.4 - bob);
+    const n = Math.max(h / 6 | 0, 10), pts = [], rad = [];
+    for (let i = 0; i <= n; i++) { const t = i / n; pts.push([this.bend * d.amp * shapes[d.shape](t), -legs - t * h]); rad.push(w * 0.5 * (1 - taper * t)); }
+    if (legs > 0) for (const s of [-1, 1]) {
+      const hx = s * w * 0.22, fx = hx + Math.sin(this.t * 9 + s) * 2;
+      line(hx, -legs - 4, fx, 0, OUT, 15, "butt"); line(hx, -legs - 4, fx, 0, d.legsColor, 9, "butt");
+      ellipse(fx - 5, -3, 10, 6, OUT);
+    }
+    if (d.base) { ellipse(0, -6, 36, 11, OUT); ellipse(0, -7, 32, 8, "#4a4e69"); }
+    if (d.coil) { ellipse(6, -12, 42, 15, OUT); ellipse(6, -13, 38, 11, shade(d.body, -0.15)); }
+    for (let i = 0; i < pts.length; i++) circle(pts[i][0], pts[i][1], rad[i] + 3.5, OUT);
+    for (let i = 0; i < pts.length; i++) circle(pts[i][0], pts[i][1], rad[i], d.body);
+    if (d.spots) for (let i = 2; i < pts.length - 2; i += 4) circle(pts[i][0] + rad[i] * (i % 8 === 2 ? 0.35 : -0.3), pts[i][1], rad[i] * 0.35, "#a0522d");
+    const straight = Math.max(0, Math.min(1, 1 - Math.abs(this.bend)));
+    const vcol = `rgba(${255},${Math.round(77 + 178 * straight)},${Math.round(77 + 178 * straight)},${1 - 0.1 * straight})`;
+    for (let i = 1; i < pts.length - 1; i += 2) circle(pts[i][0] + rad[i] * 0.35, pts[i][1], Math.max(rad[i] * 0.14, 2.5), vcol);
+    if (d.arms) {
+      const sh = pts[Math.floor(n * 0.72)], hx = sh[0] - 22 + Math.sin(this.t * 7) * 4, hy = sh[1] + 34;
+      line(sh[0], sh[1], hx, hy, OUT, 13); line(sh[0], sh[1], hx, hy, shade(d.body, -0.1), 8);
+      circle(hx, hy, 7, OUT); circle(hx, hy, 5, d.skin);
+    }
+    const top = pts[pts.length - 1], prev = pts[pts.length - 2];
+    c.save(); c.translate(top[0], top[1]); c.rotate(Math.atan2(top[1] - prev[1], top[0] - prev[0]) + Math.PI / 2);
+    this.drawHead(); c.restore();
+    c.restore();
+    if (this.showName) text(d.name, this.x, BELT_Y + this.dropY - legs - h - 72 - this.hop, 21, "#fff", { align: "center", outline: 6, font: BODY });
+  }
+  drawHead() {
+    const d = this.d, skin = d.skin;
+    switch (d.head) {
+      case "human":
+        if (d.hair === "bun") { circle(12, -46, 15, OUT); circle(12, -46, 12, d.hairColor); }
+        circle(2, -24, 27, OUT); circle(2, -24, 24, d.hairColor); circle(-3, -18, 22, skin);
+        circle(-25, -15, 7, OUT); circle(-25, -15, 5, skin);
+        this.face(-6, -18, 1);
+        if (d.glasses) { arc(-15, -21, 7.5, 0, TAU, OUT, 2); arc(1, -21, 7.5, 0, TAU, OUT, 2); }
+        break;
+      case "dog":
+        circle(0, -22, 27, OUT); circle(0, -22, 24, skin);
+        ellipse(-20, -13, 18, 13, OUT); ellipse(-20, -13, 15, 10, shade(skin, 0.35));
+        circle(-34, -16, 6, OUT);
+        ellipse(12, -18, 10, 20, OUT); ellipse(12, -18, 7, 17, shade(skin, -0.35));
+        this.face(-6, -30, 0.9); break;
+      case "cat":
+        poly([-18, -36, -10, -58, -2, -42], OUT); poly([2, -42, 12, -58, 18, -34], OUT);
+        circle(0, -22, 26, OUT); circle(0, -22, 23, skin); circle(-14, -14, 3.5, "#ff8fab");
+        for (let k = 0; k < 3; k++) { const y = -14 + (k - 1) * 4; line(-18, y, -40, y + (k - 1) * 4, OUT, 1.5); line(10, y, 32, y + (k - 1) * 4, OUT, 1.5); }
+        this.face(-4, -26, 0.9); break;
+      case "giraffe":
+        for (const dx of [0, 10]) { line(dx, -18, dx + 2, -40, OUT, 5); circle(dx + 2, -42, 5, "#6b3e1f"); }
+        ellipse(-10, -14, 26, 17, OUT); ellipse(-10, -14, 23, 14, skin); circle(-30, -12, 2.5, OUT);
+        this.face(-8, -18, 0.8); break;
+      case "banana":
+        ellipse(0, -4, 6, 10, "#4a3419"); this.face(-4, 34, 0.9); break;
+      case "robot": {
+        line(0, -40, 0, -58, OUT, 3); circle(0, -60, 6, (this.t % 1) < 0.5 ? "#ff3b3b" : "#ffd166");
+        rect(-27, -45, 54, 46, OUT); rect(-24, -42, 48, 40, skin); this.face(-4, -22, 1); break;
+      }
+      case "snake":
+        line(-30, -8, -40 - ((this.t * 3) % 1 < 0.5 ? 6 : 0), -8, "#e63946", 2.5);
+        ellipse(-10, -10, 25, 16, OUT); ellipse(-10, -10, 22, 13, skin); this.face(-10, -14, 0.8); break;
+      case "lamp":
+        circle(0, 8, 13, "rgba(255,242,128,0.5)"); circle(0, 6, 8, "#fff3b0");
+        poly([-34, 4, 34, 4, 18, -36, -18, -36], OUT); poly([-29, 1, 29, 1, 15, -33, -15, -33], skin);
+        this.face(-2, -16, 0.8); break;
+    }
+  }
+  face(cx, cy, s) {
+    const e1 = [cx - 9 * s, cy - 3 * s], e2 = [cx + 6 * s, cy - 3 * s];
+    if (this.mood === 1) {
+      arc(e1[0], e1[1], 5 * s, Math.PI, TAU, OUT, 2.5 * s); arc(e2[0], e2[1], 5 * s, Math.PI, TAU, OUT, 2.5 * s);
+      arc(cx - 2 * s, cy + 5 * s, 8 * s, 0.2, Math.PI - 0.2, OUT, 3 * s);
+    } else if (this.mood === 2) {
+      for (const e of [e1, e2]) { line(e[0] - 4 * s, e[1] - 4 * s, e[0] + 4 * s, e[1] + 4 * s, OUT, 2.5 * s); line(e[0] - 4 * s, e[1] + 4 * s, e[0] + 4 * s, e[1] - 4 * s, OUT, 2.5 * s); }
+      circle(cx - 2 * s, cy + 10 * s, 5 * s, "#7a1f2b");
+    } else {
+      for (const e of [e1, e2]) { circle(e[0], e[1], 5 * s, OUT); circle(e[0], e[1], 4 * s, "#fff"); circle(e[0] - 1.5 * s, e[1] + 0.5 * s, 2 * s, OUT); }
+      line(e1[0] - 5 * s, e1[1] - 9 * s, e1[0] + 4 * s, e1[1] - 6 * s, OUT, 2 * s);
+      line(e2[0] - 4 * s, e2[1] - 6 * s, e2[0] + 5 * s, e2[1] - 9 * s, OUT, 2 * s);
+      const m = []; for (let k = 0; k < 5; k++) m.push(cx + (-8 + k * 3.5) * s, cy + (8 + (k % 2 ? -1 : 2)) * s);
+      polyline(m, OUT, 2 * s);
+    }
+  }
+}
+
+// ------------------------------------------------------------ Dr. Crunch --
+const COAT = "#f7f7f2", SKIN = "#e8b48a", GLOVE = "#7ec8e3", STACHE = "#5b3a1e";
+const chiro = {
+  x: HIT_X, phase: 0, slam: 0, tw: 30, th: 130, sweat: 0, t: 0,
+  doSlam(w, h) { this.slam = 1; this.tw = w; this.th = h; },
+  update(dt) { this.t += dt; this.slam = Math.max(this.slam - dt / 0.16, 0); this.sweat = Math.max(this.sweat - dt, 0); },
+  drawBody() {
+    c.save(); c.translate(this.x, BELT_Y);
+    const bob = -7 * Math.pow(1 - this.phase, 4), hx = 0, hy = -395 + bob;
+    rect(-88, -318, 176, 318, OUT);
+    for (const s of [-1, 1]) { circle(s * 66, -290, 33, OUT); circle(s * 66, -290, 29, COAT); }
+    rect(-83, -313, 166, 313, COAT);
+    poly([-28, -313, 28, -313, 0, -236], "#9ad1ff");
+    poly([-7, -306, 7, -306, 11, -242, 0, -226, -11, -242], "#e63946");
+    line(-28, -313, 0, -236, OUT, 3); line(28, -313, 0, -236, OUT, 3); line(0, -236, 0, 0, OUT, 2);
+    rect(20, -276, 58, 20, OUT); rect(22, -274, 54, 16, "#fff");
+    text("DR.CRUNCH", 49, -262, 10, OUT, { align: "center", outline: 0, font: BODY });
+    c.strokeStyle = OUT; c.lineWidth = 2; c.strokeRect(-70, -250, 40, 34);
+    ["#e63946", "#3a86ff", OUT].forEach((col, k) => line(-64 + k * 12, -250, -64 + k * 12, -264, col, 4, "butt"));
+    rect(-20, -340 + bob, 40, 32, SKIN);
+    for (const s of [-1, 1]) { circle(hx + s * 57, hy + 4, 14, OUT); circle(hx + s * 57, hy + 4, 11, SKIN); }
+    circle(hx, hy, 60, OUT); circle(hx, hy, 56, SKIN);
+    ellipse(hx - 22, hy - 34, 14, 7, "rgba(255,255,255,0.35)");
+    line(hx - 56, hy - 26, hx + 56, hy - 26, OUT, 7, "butt");
+    circle(hx + 18, hy - 40, 21, OUT); circle(hx + 18, hy - 40, 17, "#cfd8e3"); circle(hx + 12, hy - 46, 5, "rgba(255,255,255,0.8)");
+    const sur = this.slam > 0.3, lift = sur ? 8 : 0;
+    for (const s of [-1, 1]) {
+      const ex = hx + s * 23, ey = hy + 2;
+      circle(ex, ey, 17, OUT); circle(ex, ey, 14, "#fff"); circle(ex, ey + 1, sur ? 6 : 5, OUT);
+      line(ex - 12, ey - 24 - lift, ex + 12, ey - 26 - lift + s * 2, OUT, 5);
+    }
+    line(hx - 6, hy + 2, hx + 6, hy + 2, OUT, 3);
+    const wig = Math.sin(this.t * 50) * 3 * this.slam;
+    for (const s of [-1, 1]) {
+      ellipse(hx + s * 20, hy + 30 + wig * s, 25, 11, OUT); ellipse(hx + s * 20, hy + 30 + wig * s, 22, 8, STACHE);
+      circle(hx + s * 44, hy + 24 - wig * s, 6, STACHE);
+    }
+    if (sur) circle(hx, hy + 45, 8, "#7a1f2b"); else arc(hx, hy + 38, 10, 0.4, Math.PI - 0.4, OUT, 3);
+    if (this.sweat > 0) {
+      const a = Math.min(this.sweat, 1), sx = hx + 62, sy = hy - 24 + (1.5 - this.sweat) * 30;
+      poly([sx, sy - 12, sx + 6, sy, sx - 6, sy], `rgba(128,204,255,${a})`); circle(sx, sy, 6, `rgba(128,204,255,${a})`);
+    }
+    c.restore();
+  },
+  drawHands() {
+    c.save(); c.translate(this.x, BELT_Y);
+    const bb = 8 * Math.pow(1 - this.phase, 3), k = this.slam * this.slam * (3 - 2 * this.slam);
+    for (const s of [-1, 1]) {
+      const sx = s * 70, sy = -290;
+      const ix = s * 130, iy = -200 + bb, gx = s * (this.tw * 0.5 + 22), gy = -this.th;
+      const hx = ix + (gx - ix) * k, hy = iy + (gy - iy) * k;
+      const ex = (sx + hx) / 2 + s * 38, ey = (sy + hy) / 2 + 10;
+      polyline([sx, sy, ex, ey, hx, hy], OUT, 30); polyline([sx, sy, ex, ey, hx, hy], COAT, 23);
+      circle(hx, hy, 23, OUT); circle(hx, hy, 19, GLOVE);
+      circle(hx - s * 4, hy - 16, 8, OUT); circle(hx - s * 4, hy - 16, 5.5, GLOVE);
+    }
+    c.restore();
+  },
+};
+
+// ---------------------------------------------------------------- popups --
+let popups = [];
+function popup(s, x, y, size, col, rise = 70, dur = 0.6) {
+  popups.push({ s, x, y, size, col, rise, dur, age: 0, rot: (Math.random() - 0.5) * 0.36 });
+}
+function drawPopups(dt) {
+  popups = popups.filter(p => (p.age += dt) < p.dur);
+  for (const p of popups) {
+    const u = Math.min(p.age / 0.14, 1), back = 1 + 2.7 * Math.pow(u - 1, 3) + 1.7 * Math.pow(u - 1, 2);
+    const sc = 0.4 + 0.6 * back, e = 1 - Math.pow(1 - p.age / p.dur, 3);
+    c.save(); c.globalAlpha = p.age > p.dur * 0.6 ? 1 - (p.age - p.dur * 0.6) / (p.dur * 0.4) : 1;
+    c.translate(p.x, p.y - p.rise * e); c.rotate(p.rot); c.scale(sc, sc);
+    text(p.s, 0, 0, p.size, p.col, { align: "center", base: "middle" });
+    c.restore();
+  }
+}
+
+// ============================================================ GAME STATE ==
+const JUDGE = {
+  perfect: ["PERFECT CRACK!", "#ffd23f", 300], great: ["NICE POP!", "#7ee081", 200],
+  ok: ["EH, CLOSE ENOUGH", "#9ad1ff", 100], miss: ["OUCH!", "#ff5a5a", 0],
+};
+const WORDS = ["CRACK!", "SNAP!", "POP!", "KRRK!", "CRUNCH!", "BLORP!"];
+const RANKS = [
+  [0.95, "S", "Board-Certified Spine Whisperer", "“I can see my toes again!” Gary from Accounting"],
+  [0.85, "A", "Chiropractor of the Month", "“Hurt so good. 5 stars.” Sir Barks-a-Lot"],
+  [0.70, "B", "Mostly Licensed", "“I’m taller now? Maybe?” A Desk Lamp"],
+  [0.50, "C", "Please Stop Touching People", "“He folded me like a lawn chair.” Grandma Edna"],
+  [0.00, "D", "Malpractice Suit Pending", "“I am now a pretzel.” Noodle the Snake"],
+];
+
+let state = "title";
+let G = null;       // current run
+let T = null;       // title demo
+let lastFrame = performance.now();
+let shake = 0;
+
+function newTitle() {
+  if (G && G.src) { try { G.src.stop(); } catch (e) {} }
+  G = null; state = "title"; popups = [];
+  chiro.x = 360;
+  T = { patient: new Patient(ROSTER[Math.floor(Math.random() * 5)]), lastBeat: -1, src: null, start: 0, clock0: performance.now() };
+  T.patient.x = 360; T.patient.showName = true;
+  if (actx && actx.state === "running") { T.start = actx.currentTime + 0.05; T.src = playBuf("title", 1, 0.6, true, T.start); }
+}
+function titleBeatTime() {
+  if (T.src) return audioHeardAt() - T.start;
+  return (performance.now() - T.clock0) / 1000;
+}
+
+function newGame() {
+  if (T && T.src) { try { T.src.stop(); } catch (e) {} }
+  state = "play"; popups = []; chiro.x = HIT_X; shake = 0;
+  const spb = RAW.song.spb;
+  _seed = LEVEL.seed * 7919;
+  const singles = ROSTER.filter(r => r.hits === 1), doubles = ROSTER.filter(r => r.hits === 2);
+  const patients = [], notes = [];
+  let last = null;
+  LEVEL.chart.forEach((row, bar) => {
+    for (let i = 0; i < 4; i++) {
+      const ch = row[i]; if (ch !== "x" && ch !== "d") continue;
+      const beat = (LEVEL.introBars + bar) * 4 + i;
+      const hits = ch === "x" ? [beat] : [beat, beat + 0.5], pool = ch === "x" ? singles : doubles;
+      let type = pool[Math.floor(rnd() * pool.length)];
+      if (type === last) type = pool[Math.floor(rnd() * pool.length)];
+      last = type;
+      const p = { type, hits, anchor: (hits[0] + hits[hits.length - 1]) / 2, node: null, done: 0, missed: false };
+      patients.push(p);
+      for (const h of hits) notes.push({ time: h * spb, p, judged: false });
+    }
+  });
+  notes.sort((a, b) => a.time - b.time);
+  const start = actx ? actx.currentTime + 0.25 : 0;
+  G = {
+    spb, patients, notes, live: [], spawnI: 0, firstOpen: 0, start,
+    songBeats: LEVEL.arrangement.length * 4, score: 0, combo: 0, maxCombo: 0, fixed: 0,
+    counts: { perfect: 0, great: 0, ok: 0, miss: 0 }, beat: -1, lastTime: -1e9, lastCount: -1,
+    src: playBuf("song", 1, 1, false, start), finishedAt: 0, rank: null, newBest: false,
+  };
+  if (navigator.wakeLock) navigator.wakeLock.request("screen").catch(() => {});
+}
+function songTime(perfMs) {
+  if (!actx) return 0;
+  return audioHeardAt(perfMs) - G.start - offsetMs / 1000;
+}
+function mult() { return Math.min(1 + Math.floor(G.combo / 10), 4); }
+
+function crack(perfMs) {
+  const t = songTime(perfMs);
+  let target = null;
+  for (let i = G.firstOpen; i < G.notes.length; i++) {
+    const n = G.notes[i], dt = t - n.time;
+    if (dt < -WIN_OK) break;
+    if (!n.judged && Math.abs(dt) <= WIN_OK) { target = n; break; }
+  }
+  if (!target) { chiro.doSlam(20, 150); playBuf("whiff", 0.9 + Math.random() * 0.25); return; }
+  const pat = target.p.node;
+  if (pat) chiro.doSlam(pat.d.width, pat.grabHeight());
+  judge(target, t - target.time);
+}
+function judge(n, dt) {
+  n.judged = true;
+  const p = n.p, pat = p.node, ad = Math.abs(dt);
+  const grade = ad <= WIN_PERFECT ? "perfect" : ad <= WIN_GREAT ? "great" : ad <= WIN_OK ? "ok" : "miss";
+  G.counts[grade]++; p.done++;
+  const [label, col, pts] = JUDGE[grade];
+  const jx = 470, jy = 560;
+  if (grade === "miss") {
+    G.combo = 0; p.missed = true;
+    if (pat) pat.botch();
+    chiro.sweat = 1.5; playBuf("womp", 0.95 + Math.random() * 0.1, 0.9);
+    popup(label, jx, jy, 54, col);
+    if (navigator.vibrate) navigator.vibrate(40);
+  } else {
+    G.combo++; G.maxCombo = Math.max(G.maxCombo, G.combo);
+    G.score += pts * mult();
+    if (pat && !p.missed) pat.adjust(1 - p.done / p.hits.length);
+    playBuf("crack", 0.85 + Math.random() * 0.4);
+    popup(label, jx, jy, grade === "perfect" ? 50 : 42, col);
+    if (grade !== "perfect") popup(dt < 0 ? "early" : "late", jx, jy + 50, 26, "#ffffff", 50);
+    popup(WORDS[Math.floor(Math.random() * WORDS.length)], HIT_X + (Math.random() - 0.5) * 120, 760, 34, "#ffffff", 90, 0.5);
+    shake = grade === "perfect" ? 10 : 5;
+  }
+  if (p.done === p.hits.length && !p.missed) {
+    G.fixed++; if (pat) pat.celebrate();
+    playBuf("boing", 0.9 + Math.random() * 0.3, 0.4);
+  }
+}
+function finish() {
+  state = "results";
+  G.finishedAt = performance.now();
+  const n = G.notes.length, c2 = G.counts;
+  G.acc = n ? (c2.perfect + c2.great * 0.7 + c2.ok * 0.4) / n : 0;
+  G.rank = RANKS.find(r => G.acc >= r[0]);
+  if (!AUTOPLAY && G.score > bestScore) { bestScore = G.score; store.set("best", bestScore); G.newBest = true; }
+  if (AUTOPLAY) window.__result = { rank: G.rank[1], score: G.score, counts: G.counts, fixed: G.fixed };
+}
+
+// ================================================================== LOOP ==
+function update(dt) {
+  chiro.update(dt);
+  shake = Math.max(shake - dt * 50, 0);
+  if (state === "title") {
+    const bt = titleBeatTime() / RAW.title.spb;
+    const beat = Math.floor(bt) % 16, phase = ((bt % 1) + 1) % 1;
+    if (bt >= 0 && beat !== T.lastBeat) {
+      T.lastBeat = beat;
+      if (beat % 2 === 0) {
+        chiro.doSlam(T.patient.d.width, T.patient.grabHeight());
+        T.patient.adjust(0); T.patient.celebrate();
+        playBuf("crack", 0.9 + Math.random() * 0.3, 0.8);
+      } else {
+        T.patient = new Patient(ROSTER[Math.floor(Math.random() * ROSTER.length)]);
+        T.patient.x = 360; T.patient.dropY = -260;
+      }
+    }
+    T.patient.dropY = Math.min(T.patient.dropY + dt * 1800, 0);
+    T.patient.phase = phase; chiro.phase = phase; T.phase = phase; T.bt = bt;
+    T.patient.update(dt);
+    return;
+  }
+  if (!G) return;
+  if (state === "play") {
+    const t = Math.max(songTime(), G.lastTime); G.lastTime = t;
+    G.beat = t / G.spb;
+    const phase = ((G.beat % 1) + 1) % 1;
+    chiro.phase = G.beat >= 0 ? phase : 0;
+    // Count-in numbers on the last intro bar.
+    const cb = Math.floor(G.beat);
+    const countStart = (LEVEL.introBars - 1) * 4;
+    if (cb >= countStart && cb < countStart + 4 && cb !== G.lastCount) {
+      G.lastCount = cb; popup(String(countStart + 4 - cb), W / 2, 600, 120, "#ffe135", 40, 0.5);
+    }
+    if (AUTOPLAY && G.firstOpen < G.notes.length && !G.notes[G.firstOpen].judged && t >= G.notes[G.firstOpen].time) crack();
+    while (G.spawnI < G.patients.length && (G.patients[G.spawnI].anchor - G.beat) * PPB <= SPAWN_AHEAD) {
+      const p = G.patients[G.spawnI++]; p.node = new Patient(p.type, p.anchor); G.live.push(p.node);
+    }
+    for (const pat of G.live) {
+      pat.x = HIT_X + (pat.anchor - G.beat) * PPB; pat.phase = phase;
+      pat.showName = pat.x > HIT_X + 110;
+    }
+    G.live = G.live.filter(p => p.x > -250);
+    while (G.firstOpen < G.notes.length) {
+      const n = G.notes[G.firstOpen];
+      if (n.judged) G.firstOpen++;
+      else if (t - n.time > WIN_OK) { judge(n, Infinity); G.firstOpen++; }
+      else break;
+    }
+    if (G.beat >= G.songBeats) finish();
+  }
+  for (const pat of G.live) pat.update(dt);
+}
+
+function draw(dt) {
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.fillStyle = OUT; c.fillRect(0, 0, cv.width, cv.height);
+  const k = view.s * view.dpr;
+  c.setTransform(k, 0, 0, k, view.ox * view.dpr, view.oy * view.dpr);
+  c.save(); c.beginPath(); c.rect(0, 0, W, H); c.clip();
+
+  if (state === "title") drawTitle();
+  else {
+    const beat = G.beat, pulse = beat >= 0 ? Math.pow(1 - (((beat % 1) + 1) % 1), 3) : 0;
+    c.save();
+    if (shake > 0) c.translate((Math.random() * 2 - 1) * shake, (Math.random() * 2 - 1) * shake);
+    drawBackground(beat * PPB, pulse, true);
+    chiro.drawBody();
+    drawZone(pulse);
+    for (const pat of G.live) pat.draw();
+    chiro.drawHands();
+    c.restore();
+    drawHud();
+    drawPopups(dt);
+    if (state === "results") drawResults();
+  }
+  if (state === "title") drawPopups(dt);
+  c.restore();
+}
+
+function drawZone(pulse) {
+  const half = 72 + 8 * pulse, glow = "255,140,26";
+  c.fillStyle = `rgba(${glow},${0.16 + 0.14 * pulse})`;
+  c.fillRect(HIT_X - half, BELT_Y - 320, half * 2, 320);
+  for (const s of [-1, 1]) {
+    const x = HIT_X + s * half;
+    for (const y of [BELT_Y - 320, BELT_Y]) {
+      const dy = y < BELT_Y ? 34 : -34;
+      for (const [col, w] of [[OUT, 11], [`rgb(${glow})`, 6]]) { line(x, y, x, y + dy, col, w, "square"); line(x, y, x - s * 26, y, col, w, "square"); }
+    }
+  }
+  ellipse(HIT_X, BELT_Y + 6, half, 12, `rgba(255,204,77,${0.45 + 0.4 * pulse})`);
+  poly([HIT_X - 20, BELT_Y + 62, HIT_X + 20, BELT_Y + 62, HIT_X, BELT_Y + 34], `rgb(${glow})`);
+}
+
+// Hit regions (logical coords) for on-canvas buttons.
+const BTN = {
+  quit: [648, 18, 56, 56],
+  minus: [130, 1182, 64, 56], plus: [526, 1182, 64, 56],
+  toTitle: [240, 1150, 240, 70],
+};
+function inBtn(b, x, y) { return x >= b[0] && x <= b[0] + b[2] && y >= b[1] && y <= b[1] + b[3]; }
+function button(b, label, size = 34) {
+  rrect(b[0], b[1] + 4, b[2], b[3], 14, "rgba(0,0,0,0.3)");
+  rrect(b[0] - 3, b[1] - 3, b[2] + 6, b[3] + 6, 16, OUT);
+  rrect(b[0], b[1], b[2], b[3], 13, "#fff6d5");
+  text(label, b[0] + b[2] / 2, b[1] + b[3] / 2 + 2, size, OUT, { align: "center", base: "middle", outline: 0 });
+}
+
+function drawHud() {
+  text(`SCORE ${G.score}`, 24, 62, 44, "#ffffff");
+  text(`Spines fixed: ${G.fixed} / ${G.patients.length}`, 26, 104, 24, "#fff6d5", { font: BODY, outline: 6 });
+  if (G.combo > 1) text(`COMBO ${G.combo}` + (mult() > 1 ? `  x${mult()}` : ""), 628, 62, 40, "#ffd23f", { align: "right" });
+  rect(24, 124, 672, 10, "rgba(0,0,0,0.3)");
+  rect(24, 124, 672 * Math.max(0, Math.min(1, G.beat / G.songBeats)), 10, "#ffd23f");
+  if (state === "play") button(BTN.quit, "✕", 28);
+  if (state === "play" && G.beat < LEVEL.introBars * 4 - 4) {
+    text("Tap anywhere on the beat", W / 2, 1120, 32, "#ffffff", { align: "center" });
+    text("when a patient is in the glowing zone", W / 2, 1160, 24, "#fff6d5", { align: "center", font: BODY, outline: 6 });
+  }
+}
+
+function drawTitle() {
+  const phase = T.phase || 0, pulse = Math.pow(1 - phase, 3);
+  drawBackground((performance.now() / 1000) * 40, pulse, false);
+  chiro.drawBody(); T.patient.draw(); chiro.drawHands();
+  const tt = performance.now() / 1000;
+  c.save(); c.translate(W / 2, 250); c.rotate(Math.sin(tt * 2) * 0.04); c.scale(1 + 0.04 * pulse, 1 + 0.04 * pulse);
+  text("RHYTHM", 0, -40, 110, "#ffe135", { align: "center", outline: 22 });
+  text("CHIROPRACTOR", 0, 70, 84, "#ffe135", { align: "center", outline: 20 });
+  c.restore();
+  text("Crack backs. On beat. Professionally.*", W / 2, 390, 30, "#ffffff", { align: "center", font: BODY, outline: 8 });
+  text("*not a real doctor", W / 2, 426, 20, "#fff6d5", { align: "center", font: BODY, outline: 6 });
+  if (bestScore > 0) text(`Best score: ${bestScore}`, W / 2, 60, 26, "#ffffff", { align: "center", font: BODY, outline: 7 });
+  c.save(); c.globalAlpha = 0.55 + 0.45 * Math.abs(Math.sin(tt * 3));
+  text("TAP TO START", W / 2, 1100, 58, "#7ee081", { align: "center" });
+  c.restore();
+  text("Two-crack patients need a quick CRACK-CRACK!", W / 2, 1146, 22, "#ffffff", { align: "center", font: BODY, outline: 6 });
+  button(BTN.minus, "–"); button(BTN.plus, "+");
+  text(`Audio offset ${offsetMs > 0 ? "+" : ""}${offsetMs} ms`, W / 2, 1212, 26, "#ffffff", { align: "center", base: "middle", font: BODY, outline: 7 });
+  text("Always late? Tap +. Always early? Tap –.", W / 2, 1262, 20, "#fff6d5", { align: "center", font: BODY, outline: 6 });
+}
+
+function drawResults() {
+  const a = Math.min((performance.now() - G.finishedAt) / 400, 1);
+  c.save(); c.globalAlpha = a;
+  rect(0, 0, W, H, "rgba(26,13,38,0.8)");
+  const r = G.rank, cx = W / 2;
+  text("SHIFT OVER!", cx, 250, 64, "#ffffff", { align: "center" });
+  text(r[1], cx, 460, 220, "#ffd23f", { align: "center", outline: 30 });
+  text(r[2], cx, 540, r[2].length > 24 ? 34 : 40, "#ffd6e0", { align: "center" });
+  text(`Score ${G.score}` + (G.newBest ? "  NEW BEST!" : `  (best ${bestScore})`), cx, 620, 38, "#ffffff", { align: "center" });
+  const lines = [
+    [`Spines fixed ${G.fixed} / ${G.patients.length}`, "#ffffff"],
+    [`Max combo ${G.maxCombo}   Accuracy ${Math.round(G.acc * 100)}%`, "#ffffff"],
+    [`Perfect ${G.counts.perfect}  Great ${G.counts.great}  OK ${G.counts.ok}  Miss ${G.counts.miss}`, "#9ad1ff"],
+  ];
+  lines.forEach(([s, col], i) => text(s, cx, 690 + i * 44, 28, col, { align: "center", font: BODY, outline: 7 }));
+  text("★ Review", cx, 870, 28, "#fff6d5", { align: "center" });
+  wrapText(r[3], cx, 912, 620, 26, 36, "#fff6d5");
+  if (performance.now() - G.finishedAt > 1000) {
+    text("TAP FOR ANOTHER SHIFT", cx, 1090, 44, "#7ee081", { align: "center" });
+    button(BTN.toTitle, "Title screen", 30);
+  }
+  c.restore();
+}
+function wrapText(s, x, y, maxW, size, lh, col) {
+  c.font = `${size}px ${BODY}`;
+  const words = s.split(" "); let lineStr = "", yy = y;
+  for (const w of words) {
+    const test = lineStr ? lineStr + " " + w : w;
+    if (c.measureText(test).width > maxW && lineStr) { text(lineStr, x, yy, size, col, { align: "center", font: BODY, outline: 6 }); lineStr = w; yy += lh; }
+    else lineStr = test;
+  }
+  if (lineStr) text(lineStr, x, yy, size, col, { align: "center", font: BODY, outline: 6 });
+}
+
+function frameLoop(now) {
+  const dt = Math.min((now - lastFrame) / 1000, 0.05); lastFrame = now;
+  update(dt); draw(dt);
+  requestAnimationFrame(frameLoop);
+}
+
+// ================================================================= INPUT ==
+function toLogical(e) {
+  const r = cv.getBoundingClientRect();
+  return [(e.clientX - r.left - view.ox) / view.s, (e.clientY - r.top - view.oy) / view.s];
+}
+function eventPerf(e) {
+  const ts = e.timeStamp;
+  return ts && Math.abs(ts - performance.now()) < 1000 ? ts : performance.now();
+}
+// Gameplay uses pointerdown for the lowest latency; menus act on pointerup,
+// which iOS reliably treats as a user gesture for starting audio.
+cv.addEventListener("pointerdown", e => {
+  e.preventDefault(); cv.focus();
+  if (state !== "play") return;
+  const [x, y] = toLogical(e);
+  if (inBtn(BTN.quit, x, y)) return;
+  crack(eventPerf(e));
+}, { passive: false });
+cv.addEventListener("pointerup", e => {
+  e.preventDefault();
+  unlockAudio();
+  const [x, y] = toLogical(e);
+  if (state === "play") { if (inBtn(BTN.quit, x, y)) newTitle(); return; }
+  if (state === "title") {
+    if (inBtn(BTN.minus, x, y) || inBtn(BTN.plus, x, y)) {
+      offsetMs += inBtn(BTN.plus, x, y) ? 10 : -10; store.set("offset", offsetMs); return;
+    }
+    newGame(); return;
+  }
+  if (state === "results" && performance.now() - G.finishedAt > 1000) {
+    if (inBtn(BTN.toTitle, x, y)) newTitle(); else newGame();
+  }
+}, { passive: false });
+for (const ev of ["touchstart", "touchmove", "touchend", "gesturestart", "dblclick", "contextmenu"]) {
+  cv.addEventListener(ev, e => { e.preventDefault(); if (ev === "touchend") unlockAudio(); }, { passive: false });
+}
+window.addEventListener("keydown", e => {
+  if (e.repeat) return;
+  const crackKey = [" ", "z", "x", "j", "k", "Enter"].includes(e.key);
+  if (e.key === "Escape") { if (state !== "title") newTitle(); return; }
+  if (!crackKey) return;
+  e.preventDefault();
+  unlockAudio();
+  if (state === "play") crack(eventPerf(e));
+  else if (state === "title") newGame();
+  else if (state === "results" && performance.now() - G.finishedAt > 1000) newGame();
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && state === "play") newTitle();
+});
+
+// ================================================================== BOOT ==
+resize();
+newTitle();
+const fontsReady = document.fonts ? Promise.race([document.fonts.load(`40px "Lilita One"`), new Promise(r => setTimeout(r, 1500))]) : Promise.resolve();
+fontsReady.then(() => requestAnimationFrame(frameLoop));
+</script>

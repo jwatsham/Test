@@ -15,6 +15,18 @@ snakes, a banana, a desk lamp) and you crack their spines straight **on the beat
 No asset files are needed. All art is drawn in code and all audio (music + SFX) is
 synthesized at startup, so the project runs straight from a fresh clone.
 
+## Web version (phone, portrait)
+
+`web/index.html` is a standalone JavaScript port of the same game, laid out for portrait
+phones: tap anywhere to crack. It's a single file with no build step. It's written as an
+HTML fragment (no `<html>`/`<head>` wrapper) because it's published as a Claude artifact,
+which adds that wrapper. To host it elsewhere, wrap it in a normal HTML document with a
+`<meta name="viewport" content="width=device-width, initial-scale=1">` tag. Add `#autoplay`
+to the URL to watch a bot play.
+
+The Godot project is still the main version. Treat the web build as a playable sketch
+for testing the fun on a phone. Gameplay changes need to be made in both places.
+
 ## Controls
 
 | Action | Keys |
