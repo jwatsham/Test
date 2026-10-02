@@ -19,9 +19,17 @@ and every sound effect) is synthesized at startup.
 
 ## Phone version
 
-`web/index.html` is a single-file JavaScript port laid out for portrait phones. Touch junk
-in the water and Pool Boy walks around the edge to it and reaches the net to your finger.
-Drag to follow drifting junk. Tap the deck or the trash can to walk there. Arrow keys and
+`web/index.html` is a single-file JavaScript port laid out for portrait phones, with
+**tap-to-queue** controls so your thumb never covers the junk:
+
+- Tap near a piece of junk to queue it. Taps snap to the closest item, and you can queue up
+  to 3, shown as numbered markers. Tap a queued item again to cancel it.
+- Pool Boy works through the queue on his own, and walks to the trash when his net is full.
+- Tap the deck or the trash can to walk there right away (for example, to dump early).
+- He never reaches through Uncle Dale. He waits for Dale to drift off, and gives up on an
+  item after 2.5 seconds.
+
+ Arrow keys and
 Space work on desktop. Add `#autoplay` to the URL to watch the bot play. Like the Rhythm
 Chiropractor web build, it's written as an HTML fragment for publishing as a Claude
 artifact.
