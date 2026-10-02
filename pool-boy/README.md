@@ -34,6 +34,25 @@ the game renders into a 240x427 pixel buffer that's scaled up crisply, with hand
 and a built-in bitmap font. The UI is retro-RPG style too: black bordered windows, a rolling
 tips odometer, typewriter dialog, and swirling title and results backgrounds.
 
+**Progression.** A Job Board of days, each a shift with a tips goal (1 to 3 stars at 1x,
+1.4x and 1.8x the goal). Passing a day unlocks the next. Days 1 to 7 each introduce one
+thing (basics, leaf season, frogs, Uncle Dale, wind, a pool party, a stricter gross limit),
+then endless days keep scaling. All tips go into a wallet for the Pool Supply store:
+Bigger Net, Fast Flip-Flops, Longer Pole, Clipboard (queue size), and Pool Chemicals
+(junk counts as less gross). Day data is `DAYS` and upgrades are `UPG` in the script.
+Progress saves in the browser's local storage.
+
+**Placeholder ads.** An `Ads` object with the same shape as a real SDK: a bottom banner
+slot (the game shrinks to fit above it), interstitials only between shifts (not in the first
+3 shifts, at most every 2nd transition, 60 s apart), and rewarded ads for "Double tips" and
+"Second chance" when fired. Swapping in a real SDK (for example AdMob through a Capacitor
+plugin) means replacing the insides of `Ads.banner`, `Ads.maybeInterstitial` and
+`Ads.rewarded`.
+
+**Balance harness.** In the browser console, `__sim(dayIndex, upgrades)` plays a whole
+shift with the bot in a fraction of a second and returns the result, for example
+`__sim(5, { net: 1, shoes: 1, chem: 1 })`.
+
 Arrow keys and Space work on desktop. Add `#autoplay` to the URL to watch the bot play. Like the Rhythm
 Chiropractor web build, it's written as an HTML fragment for publishing as a Claude
 artifact.

@@ -8,6 +8,7 @@
   color-scheme: dark;
 }
 html, body { height: 100%; }
+body { display: flex; flex-direction: column; }
 body {
   margin: 0;
   background: var(--bg);
@@ -19,10 +20,23 @@ body {
   -webkit-touch-callout: none;
   -webkit-tap-highlight-color: transparent;
 }
-#game { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
+#game { display: block; width: 100%; flex: 1 1 auto; min-height: 0; touch-action: none; outline: none; }
+/* Placeholder ads. Swap for a real SDK (e.g. AdMob via Capacitor) when shipping. */
+#banner { flex: 0 0 50px; display: flex; align-items: center; justify-content: center; background: #1b1626; }
+#banner > div { width: 320px; max-width: 100%; height: 50px; display: flex; align-items: center; justify-content: center; gap: 8px;
+  background: repeating-linear-gradient(45deg, #2c2540 0 10px, #241e36 10px 20px); color: #a99fc9;
+  font: 600 12px/1.2 ui-monospace, Menlo, Consolas, monospace; letter-spacing: 0.04em; border: 1px dashed #5d5287; box-sizing: border-box; }
+.ad-overlay { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+  padding: 24px; background: #0b0910; color: #e9e4ff; font: 600 15px/1.4 ui-monospace, Menlo, Consolas, monospace; text-align: center; touch-action: none; }
+.ad-overlay .ad-box { width: min(320px, 100%); aspect-ratio: 9 / 16; max-height: 60vh; display: flex; align-items: center; justify-content: center;
+  border: 2px dashed #5d5287; background: repeating-linear-gradient(45deg, #2c2540 0 14px, #241e36 14px 28px); padding: 16px; box-sizing: border-box; }
+.ad-overlay button { font: inherit; color: #0b0910; background: #e9e4ff; border: 0; border-radius: 8px; padding: 10px 18px; cursor: pointer; }
+.ad-overlay button:focus-visible { outline: 3px solid #ffd23f; outline-offset: 2px; }
+.ad-overlay .ad-skip { background: transparent; color: #a99fc9; text-decoration: underline; padding: 4px 8px; }
 </style>
 
 <canvas id="game" tabindex="0" aria-label="Pool Boy game. Tap junk in the pool to send Pool Boy after it."></canvas>
+<div id="banner" hidden><div>TEST AD · 320×50 banner</div></div>
 
 <script>
 "use strict";
@@ -37,11 +51,11 @@ const W = 720, H = 1280, TAU = Math.PI * 2;
 const AUTOPLAY = location.hash === "#autoplay";
 
 // ----------------------------------------------------------------- tuning --
-const SHIFT_LENGTH = 120, SPEED = 360, PLAYER_R = 20, MAX_REACH = 250;
-const EXTEND_RATE = 2.6, RETRACT_RATE = 4.5, CAPACITY = 5;
+// Shift length, walk speed, net size, reach and queue size come from the day and the upgrades (see PROGRESSION).
+const PLAYER_R = 20, EXTEND_RATE = 2.6, RETRACT_RATE = 4.5;
 const GROSS_MAX = 35, GROSS_GRACE = 4, DUMP_RADIUS = 60, FULL_NET_BONUS = 5, DALE_PENALTY = 5;
 const NET_R = 30;
-const QUEUE_MAX = 3, SNAP_R = 95;   // tap-to-queue: max queued targets, snap radius around a tap
+const SNAP_R = 95;   // tap-to-queue: snap radius around a tap
 
 // ----------------------------------------------------------------- layout --
 const rectGrow = (r, g) => ({ x: r.x - g, y: r.y - g, w: r.w + 2 * g, h: r.h + 2 * g });
@@ -257,7 +271,9 @@ const FONT = {
   "$": "..#../.####/#.#../.###./..#.#/####./..#..", "%": "##..#/##..#/...#./..#../.#.../#..##/#..##",
   "/": "....#/...#./...#./..#../.#.../.#.../#....", "(": ".#/#./#./#./#./#./.#", ")": "#./.#/.#/.#/.#/.#/#.",
   "&": ".##../#..#./#.#../.#.../#.#.#/#..#./.##.#", "*": "...../#.#.#/.###./#####/.###./#.#.#",
-  "•": "./../.###./#####/#####/#####/.###.", "▶": "#.../##../###./####/###./##../#...",
+  "•": "./../.###./#####/#####/#####/.###.",
+  "✓": "...../....#/...#./#.#../.#.../...../.....",
+  "★": "...#.../..###../#######/.#####./..###../.##.##./##...##", "☆": "...#.../..#.#../###.###/.#...#./..#.#../.#.#.#./##...##", "▶": "#.../##../###./####/###./##../#...",
 };
 const GLYPHS = {};
 for (const ch in FONT) {
@@ -556,13 +572,13 @@ function drawBoy(b, scale = 1, forcedFacing = null) {
   const sx = fx - Math.floor(spr.width * scale / 2), sy = fy - spr.height * scale;
   const hand = { down: [0, -8], up: [0, -10], right: [5, -9], left: [-5, -9] }[face];
   const hx = fx + hand[0] * scale, hy = fy + hand[1] * scale;
-  const nx = px(b.head.x), ny = px(b.head.y), full = b.contents.length >= CAPACITY;
+  const nx = px(b.head.x), ny = px(b.head.y), cp = capacity(), full = b.contents.length >= cp;
   const drawNet = () => {
     linePx(hx, hy, nx, ny, INK, 3); linePx(hx, hy, nx, ny, "#d8e0e8", 1);
     disc(nx, ny, 11, INK); disc(nx, ny, 10, "#88d0f0");
     for (let yy = -9; yy <= 9; yy++) for (let xx = -9; xx <= 9; xx++)
       if ((xx + yy) % 2 === 0 && xx * xx + yy * yy < 85) R(nx + xx, ny + yy, 1, 1, "rgba(255,255,255,0.55)");
-    b.contents.forEach((col, i) => { const a = i / CAPACITY * TAU + 0.5, cx2 = nx + Math.round(Math.cos(a) * 5), cy2 = ny + Math.round(Math.sin(a) * 5); R(cx2 - 2, cy2 - 2, 4, 4, INK); R(cx2 - 1, cy2 - 1, 2, 2, col); });
+    b.contents.forEach((col, i) => { const a = i / cp * TAU + 0.5, cx2 = nx + Math.round(Math.cos(a) * 5), cy2 = ny + Math.round(Math.sin(a) * 5); R(cx2 - 2, cy2 - 2, 4, 4, INK); R(cx2 - 1, cy2 - 1, 2, 2, col); });
     ringPx(nx, ny, 10, full && (yard.t % 0.4) < 0.2 ? C.red : C.yellow);
     ringPx(nx, ny, 9, full && (yard.t % 0.4) < 0.2 ? C.red : C.yellow);
   };
@@ -637,40 +653,142 @@ function updateDebris(d, dt, wind, onLand) {
   d.x = clamp(d.x, x0, x1); d.y = clamp(d.y, y0, y1);
 }
 
+// ============================================================ PROGRESSION ==
+// Each day introduces one new thing. Goals are tips needed to pass; stars at 1x / 1.4x / 1.8x the goal.
+const ALL_JUNK = ["sock", "duck", "pizza", "toupee", "phone", "ball", "bandaid"];
+const DAYS = [
+  { name: "First Day on the Job", len: 60, goal: 20, rate: [3.4, 2.4], leafShare: 0.6, junk: ["sock", "duck"],
+    intro: "Welcome aboard, hon! Tap junk in the pool and you'll fetch it. When your net's full, you dump it in the trash." },
+  { name: "Leaf Season", len: 75, goal: 30, rate: [3.0, 2.0], leafShare: 0.7, junk: ["sock", "duck", "pizza"],
+    intro: "That oak tree is shedding like crazy. Leaves are cheap, but they add up. Keep up!" },
+  { name: "The Frog Situation", len: 90, goal: 40, rate: [3.0, 1.8], leafShare: 0.5, junk: ["sock", "duck", "pizza", "phone"], frogs: true,
+    intro: "Frogs keep hopping in. Rescue them! They don't take up net space, and I pay $10 a frog." },
+  { name: "Uncle Dale's Visit", len: 100, goal: 50, rate: [2.9, 1.6], leafShare: 0.5, junk: ["sock", "duck", "pizza", "phone", "toupee"], frogs: true, dale: true,
+    intro: "My brother Dale is napping on his floatie. Do NOT wake him. Junk near Dale can wait." },
+  { name: "Windy Wednesday", len: 110, goal: 60, rate: [2.9, 1.5], leafShare: 0.55, junk: ALL_JUNK, frogs: true, dale: true, gusts: [8, 13],
+    intro: "Big winds today. Gusts blow junk all over and shake loose more leaves." },
+  { name: "Pool Party!", len: 120, goal: 75, rate: [2.4, 1.2], leafShare: 0.4, junk: ALL_JUNK, frogs: true, dale: true, gusts: [14, 22],
+    intro: "I'm throwing a pool party! Expect pizza. Expect socks. Expect... everything." },
+  { name: "Book Club Inspection", len: 120, goal: 80, rate: [2.6, 1.25], leafShare: 0.5, junk: ALL_JUNK, frogs: true, dale: true, gusts: [14, 22], grossMul: 0.75,
+    intro: "The book club arrives at four. The pool must be SPOTLESS. My standards are lower than usual. I mean higher." },
+];
+const ENDLESS = [
+  { name: "Just Another Tuesday", intro: "Same as always, hon. Spotless, please." },
+  { name: "Gale Warning", gusts: [6, 10], intro: "The radio says gale warning. Hold onto your shorts." },
+  { name: "Neighborhood Party", rateMul: 0.85, intro: "The neighbors are partying. Their kid has a LOT of socks." },
+  { name: "The In-Laws", grossMul: 0.8, intro: "My in-laws are visiting. They notice EVERYTHING." },
+];
+function dayConfig(i) {
+  if (i < DAYS.length) return { frogs: false, dale: false, gusts: null, grossMul: 1, ...DAYS[i] };
+  const n = i - DAYS.length + 1, last = DAYS[DAYS.length - 1], m = ENDLESS[(n - 1) % ENDLESS.length];
+  return { ...last, gusts: m.gusts || last.gusts, grossMul: m.grossMul || 1, name: m.name, intro: m.intro, len: 120,
+    goal: Math.round(last.goal + n * 10),
+    rate: [Math.max(1.7, last.rate[0] - n * 0.05), Math.max(0.85, (last.rate[1] - n * 0.03) * (m.rateMul || 1))] };
+}
+const starsFor = (tips, goal) => tips >= goal * 1.8 ? 3 : tips >= goal * 1.4 ? 2 : tips >= goal ? 1 : 0;
+
+// Upgrades bought in the Pool Supply store. vals[level] is the stat at that level.
+const UPG = [
+  { id: "net", name: "Bigger Net", desc: "Holds 1 more piece of junk", costs: [60, 150, 300, 550], vals: [5, 6, 7, 8, 9] },
+  { id: "shoes", name: "Fast Flip-Flops", desc: "Walk faster around the pool", costs: [50, 130, 280, 500], vals: [360, 410, 460, 510, 560] },
+  { id: "pole", name: "Longer Pole", desc: "Reach farther into the pool", costs: [80, 200, 400], vals: [250, 285, 320, 355] },
+  { id: "clip", name: "Clipboard", desc: "Queue 1 more target", costs: [150, 400], vals: [3, 4, 5] },
+  { id: "chem", name: "Pool Chemicals", desc: "Junk is 15% less gross", costs: [100, 250, 500], vals: [1, 0.85, 0.72, 0.6] },
+];
+const SAVE = Object.assign({ unlocked: 1, stars: [], wallet: 0, up: { net: 0, shoes: 0, pole: 0, clip: 0, chem: 0 }, best: 0, shifts: 0 }, store.get("save", {}));
+SAVE.best = Math.max(SAVE.best, bestTips);
+let botOn = AUTOPLAY;   // test bot (also drives the balance simulator)
+function persist() { if (!botOn) store.set("save", SAVE); }
+const stat = id => { const u = UPG.find(u => u.id === id); return u.vals[SAVE.up[id] || 0]; };
+const capacity = () => (G ? G.cap : stat("net"));
+
+// ==================================================================== ADS ==
+// Placeholder ad layer with the same shape as a real SDK, so swapping in AdMob
+// (via a Capacitor plugin) later only means replacing these three functions' insides.
+const Ads = {
+  duration: 5,              // seconds a placeholder ad "plays"
+  everyNShifts: 2,          // interstitial at most every Nth shift transition
+  minGapSec: 60,            // and never closer together than this
+  graceShifts: 3,           // no interstitials during a player's first shifts
+  _since: 0, _last: -1e9,
+  banner(show) {
+    const el = document.getElementById("banner");
+    if (el.hidden === !show) return;
+    el.hidden = !show; resize();
+  },
+  _overlay(kind, rewarded) {
+    return new Promise(resolve => {
+      musicVolume(0);
+      const o = document.createElement("div"); o.className = "ad-overlay"; o.setAttribute("role", "dialog");
+      o.innerHTML = `<div>TEST ${kind} AD</div><div class="ad-box">A real ${kind.toLowerCase()} ad would play here.</div><div class="ad-count"></div>`;
+      const count = o.querySelector(".ad-count");
+      const done = ok => { clearInterval(timer); o.remove(); musicVolume(0.5); console.log("[ads]", kind, ok ? "completed" : "skipped"); resolve(ok); };
+      if (rewarded) { const skip = document.createElement("button"); skip.className = "ad-skip"; skip.textContent = "Skip (no reward)"; skip.onclick = () => done(false); o.append(skip); }
+      let left = Ads.duration;
+      const tick = () => {
+        if (left > 0) { count.textContent = rewarded ? `Reward in ${Math.ceil(left)}…` : `You can close this in ${Math.ceil(left)}…`; return; }
+        clearInterval(timer);
+        count.textContent = rewarded ? "Reward earned!" : "";
+        const close = document.createElement("button"); close.textContent = rewarded ? "Collect reward" : "✕ Close ad";
+        close.onclick = () => done(true); count.after(close); close.focus();
+      };
+      const timer = setInterval(() => { left -= 0.25; tick(); }, 250);
+      tick();
+      for (const ev of ["pointerdown", "pointerup", "touchstart", "touchend"]) o.addEventListener(ev, e => e.stopPropagation());
+      document.body.append(o);
+    });
+  },
+  // Call at a natural break. Shows an interstitial only when pacing rules allow.
+  maybeInterstitial() {
+    this._since++;
+    const now = performance.now() / 1000;
+    if (botOn || SAVE.shifts < this.graceShifts || this._since < this.everyNShifts || now - this._last < this.minGapSec) return Promise.resolve(false);
+    this._since = 0; this._last = now;
+    return this._overlay("INTERSTITIAL", false);
+  },
+  // Resolves true if the player watched to the end and should get the reward.
+  rewarded() { return botOn ? Promise.resolve(true) : this._overlay("REWARDED", true); },
+};
+
 // ============================================================= GAME STATE ==
 const REMARKS = ["Don't forget the deep end, sweetie!", "I pay you in exposure, you know.", "Love the shorts. Very... brave.",
   "My husband built this pool himself.", "That net is older than you are.", "Are you skimming or swimming?", "Hustle! The book club arrives at 4!"];
-const RANKS = [
-  [150, "Pool Legend", "“Marry me. Or at least come back Tuesday.”"],
-  [100, "Employee of the Month", "“Sparkling! Have a lemonade.”"],
-  [60, "Adequate Pool Boy", "“It's... wet. That's something.”"],
-  [30, "Pool Disappointment", "“I found a sock in my lemonade.”"],
-  [0, "Please Return the Net", "“Who even hired you?”"],
-];
+const QUOTES = {
+  3: "“Marry me. Or at least come back tomorrow.”", 2: "“Sparkling! Have a lemonade.”",
+  1: "“It's... clean enough. Barely.”", 0: "“I found a sock in my lemonade.”", fired: "“I've seen cleaner swamps.”",
+};
 
-let state = "title", G = null, items = [], lastFrame = performance.now();
+let state = "title", G = null, items = [], lastFrame = performance.now(), boardTop = 0, introDay = 0, busy = false;
 const boy = { x: 360, y: LOOP.y + LH, ang: -Math.PI / 2, head: { x: 360, y: 900 }, contents: [], moving: false, walk: 0, stun: 0 };
 const keys = new Set();
 
 function say(s, sec = 3) { yard.bubble = s; yard.typed = 0; yard.bubbleTime = sec + s.length / 40; if (G) G.remarkCd = rand(9, 14); }
 
-function newTitle() {
-  state = "title"; G = null; popups = []; ripples = []; items = []; musicVolume(0.5);
-  boy.contents = []; boy.stun = 0; yard.bubbleTime = 0; yard.kidX = -1; yard.binGlow = 0; yard.wind = { x: 0, y: 0 };
+function resetYard() { popups = []; ripples = []; items = []; boy.contents = []; boy.stun = 0; yard.kidX = -1; yard.binGlow = 0; yard.wind = { x: 0, y: 0 }; yard.bubbleTime = 0; }
+function toTitle() { state = "title"; G = null; resetYard(); musicVolume(0.5); Ads.banner(true); }
+function toBoard() { state = "board"; G = null; resetYard(); musicVolume(0.5); Ads.banner(true); boardTop = Math.max(0, SAVE.unlocked - 8); }
+function toStore() { state = "store"; Ads.banner(true); }
+function toIntro(day) {
+  introDay = day; state = "intro"; G = null; resetYard(); Ads.banner(true);
+  say(dayConfig(day).intro, 1e9);
 }
-function newGame() {
-  state = "play"; popups = []; ripples = []; items = []; musicVolume(0.5);
-  G = { time: 0, tips: 0, scooped: 0, frogs: 0, naps: 0, ext: 0, stun: 0, contents: [],
-    spawnCd: 1.5, gustCd: 16, gustTime: 0, gustDir: { x: 1, y: 0 }, gustLeaves: 0, wind: { x: 0, y: 0 },
-    frogCd: 22, dale: false, walkTo: null, queue: [], blocked: 0, kidTime: 0, remarkCd: 5, grossOver: 0, finishedAt: 0, fired: false, newBest: false, shownTips: 0 };
-  boy.x = 360; boy.y = LOOP.y + LH; boy.contents = []; boy.ang = -Math.PI / 2;
+
+function newGame(day) {
+  const cfg = dayConfig(day);
+  state = "play"; resetYard(); musicVolume(0.5); Ads.banner(true);
+  G = { day, cfg, len: cfg.len, goal: cfg.goal, time: 0, tips: 0, scooped: 0, frogs: 0, naps: 0, ext: 0, stun: 0, contents: [],
+    cap: stat("net"), speed: stat("shoes"), reach: stat("pole"), queueMax: stat("clip"), chem: stat("chem"), grossMax: GROSS_MAX * (cfg.grossMul || 1),
+    spawnCd: 1.5, gustCd: cfg.gusts ? cfg.gusts[0] : 1e9, gustTime: 0, gustDir: { x: 1, y: 0 }, gustLeaves: 0, wind: { x: 0, y: 0 },
+    frogCd: cfg.frogs ? 10 : 1e9, dale: false, walkTo: null, queue: [], blocked: 0, kidTime: 0, remarkCd: 8, grossOver: 0,
+    finishedAt: 0, fired: false, passed: false, stars: 0, banked: 0, doubled: false, revived: false, goalHit: false, newBest: false, shownTips: 0 };
+  boy.x = 360; boy.y = LOOP.y + LH; boy.ang = -Math.PI / 2;
   for (let i = 0; i < 4; i++) { const d = makeDebris("leaf"), p = randPoolPoint(); d.x = p.x; d.y = p.y; items.push(d); }
-  say("Pool's filthy, hon. Get skimming!", 3.5);
+  say(day === 0 ? "Tap the junk, hon. Go on!" : "Pool's filthy. Get skimming!", 3);
   if (navigator.wakeLock) navigator.wakeLock.request("screen").catch(() => {});
 }
 
-const netReach = ext => 26 + ext * (MAX_REACH - 26);
-const gross = () => items.reduce((g, d) => g + (d.state === "float" && !d.leaving ? d.info.gross : 0), 0);
+const netReach = ext => 26 + ext * (G.reach - 26);
+const gross = () => items.reduce((s, d) => s + (d.state === "float" && !d.leaving ? d.info.gross : 0), 0) * (G ? G.chem : 1);
 
 function onLanded(d) {
   if (d.leaving) { d.dead = true; return; }
@@ -678,7 +796,7 @@ function onLanded(d) {
   play("splash", rand(0.8, 1.3) * (d.kind === "dale" ? 0.7 : 1), d.kind === "leaf" ? 0.5 : 1);
 }
 
-// Tap-to-queue: tapped junk goes into a queue (max 3) that Pool Boy works through on his own.
+// Tap-to-queue: tapped junk goes into a queue that Pool Boy works through on his own.
 const queueable = d => (d.state === "float" || d.state === "fly") && d.kind !== "dale" && !d.dead && !d.leaving;
 let taps = [];   // tap feedback rings
 function tapAt(p) {
@@ -693,11 +811,11 @@ function tapAt(p) {
   }
   const i = G.queue.indexOf(best);
   if (i >= 0) { G.queue.splice(i, 1); play("tick", 0.7, 0.6); return; }
-  if (G.queue.length >= QUEUE_MAX) { popup("3 AT A TIME!", p.x, p.y - 40, 26, "#ff5a5a"); return; }
+  if (G.queue.length >= G.queueMax) { popup(`${G.queueMax} AT A TIME!`, p.x, p.y - 40, 26, "#ff5a5a"); return; }
   G.queue.push(best); G.walkTo = null; play("tick", 1 + G.queue.length * 0.15, 0.7);
 }
 function botQueue() {
-  while (G.queue.length < QUEUE_MAX) {
+  while (G.queue.length < G.queueMax) {
     const from = G.queue.length ? G.queue[G.queue.length - 1] : boy, s0 = loopS(from);
     const dale = items.find(d => d.kind === "dale" && d.state === "float");
     let best = null, bd = Infinity;
@@ -716,15 +834,15 @@ function controlTarget() {
   const head0 = G.queue[0];
   G.queue = G.queue.filter(queueable);
   if (G.queue[0] !== head0) G.blocked = 0;
-  if (AUTOPLAY) botQueue();
+  if (botOn) botQueue();
   if (G.walkTo) return G.walkTo;
-  if (G.contents.length >= CAPACITY) return BIN;
+  if (G.contents.length >= G.cap) return BIN;
   return G.queue[0] || null;
 }
 
 function updatePlay(dt) {
   G.time += dt;
-  const speed = SPEED * (G.ext > 0.2 ? 0.5 : 1);
+  const speed = G.speed * (G.ext > 0.2 ? 0.5 : 1), reachSpan = G.reach - 26;
   let extTarget = 0, moved = false;
   if (G.stun > 0) G.stun -= dt;
   const kx = (keys.has("ArrowRight") || keys.has("d") ? 1 : 0) - (keys.has("ArrowLeft") || keys.has("a") ? 1 : 0);
@@ -749,14 +867,14 @@ function updatePlay(dt) {
     const inWater = inRect(target, rectGrow(POOL, 6));
     if (inWater && Math.abs(ds) < 16) {
       const need = dist(poolPoint(boy), target);
-      extTarget = Math.max(0.06, clamp((need + 8 - 26) / (MAX_REACH - 26), 0, 1));
+      extTarget = Math.max(0.06, clamp((need + 8 - 26) / reachSpan, 0, 1));
       // He works on his own, so he never pokes Dale: stop the net short and wait for Dale to drift off.
       const dale = items.find(d => d.kind === "dale" && d.state === "float");
       if (dale) {
         const rim = poolPoint(boy), dir = intoPool(boy), rMax = netReach(extTarget);
         for (let r = 26; r <= rMax; r += 8) {
           if (dist({ x: rim.x + dir.x * r, y: rim.y + dir.y * r }, dale) < NET_R + dale.r * 0.8 + 10) {
-            extTarget = Math.min(extTarget, clamp((r - 20 - 26) / (MAX_REACH - 26), 0, 1));
+            extTarget = Math.min(extTarget, clamp((r - 20 - 26) / reachSpan, 0, 1));
             if (target === G.queue[0] && (G.blocked += dt) > 2.5) {
               popup("Dale's in the way!", target.x, target.y - 40, 26, "#fff");
               G.queue.shift(); G.blocked = 0;
@@ -779,11 +897,11 @@ function updatePlay(dt) {
 
   // Dump.
   if (G.contents.length && dist(boy, BIN) < DUMP_RADIUS) {
-    const full = G.contents.length >= CAPACITY; G.contents = [];
+    const full = G.contents.length >= G.cap; G.contents = [];
     play("dump", rand(0.9, 1.1)); popup("DUMPED!", BIN.x + 90, BIN.y - 60, 36, "#fff");
     if (full) { G.tips += FULL_NET_BONUS; popup(`FULL NET +$${FULL_NET_BONUS}`, BIN.x + 120, BIN.y - 110, 30, "#7ee081"); }
   }
-  yard.binGlow = G.contents.length >= CAPACITY ? 1 : 0;
+  yard.binGlow = G.contents.length >= G.cap ? 1 : 0;
   yard.canopyAlpha += clamp((dist(boy, TREE) < 200 ? 0.35 : 1) - yard.canopyAlpha, -dt * 4, dt * 4);
 
   spawns(dt); wind(dt);
@@ -791,20 +909,25 @@ function updatePlay(dt) {
   netCatch();
   items = items.filter(d => !d.dead);
 
-  const g = gross();
-  if (g >= GROSS_MAX) {
+  if (!G.goalHit && G.tips >= G.goal) {
+    G.goalHit = true; play("whistle", 1.3, 0.5);
+    popup("GOAL REACHED!", 360, 640, 40, "#ffd23f", 80, 1.6);
+  }
+  const g2 = gross();
+  if (g2 >= G.grossMax) {
     if (G.grossOver === 0) say("This pool is DISGUSTING! Fix it NOW!", GROSS_GRACE);
     G.grossOver += dt;
     if (G.grossOver >= GROSS_GRACE) return finish(true);
   } else G.grossOver = Math.max(G.grossOver - dt * 2, 0);
   if ((G.remarkCd -= dt) <= 0) say(pick(REMARKS));
-  if (G.time >= SHIFT_LENGTH) finish(false);
+  if (G.time >= G.len) finish(false);
 }
 
 function spawns(dt) {
+  const cfg = G.cfg;
   if ((G.spawnCd -= dt) <= 0) {
-    G.spawnCd = (2.8 + (1.2 - 2.8) * (G.time / SHIFT_LENGTH)) * rand(0.7, 1.3);
-    if (Math.random() < 0.5) spawnLeaf(); else spawnJunk();
+    G.spawnCd = (cfg.rate[0] + (cfg.rate[1] - cfg.rate[0]) * (G.time / G.len)) * rand(0.7, 1.3);
+    if (Math.random() < cfg.leafShare) spawnLeaf(); else spawnJunk();
   }
   if ((G.frogCd -= dt) <= 0) {
     G.frogCd = rand(18, 28);
@@ -812,7 +935,7 @@ function spawns(dt) {
     throwDebris(f, { x: side ? 10 : W - 10, y: rand(400, 1000) }, randPoolPoint(60), 0.9); items.push(f);
     play("ribbit"); say("Is that a FROG?! Get it out!", 2.5);
   }
-  if (!G.dale && G.time > 14) {
+  if (cfg.dale && !G.dale && G.time > 8) {
     G.dale = true; const d = makeDebris("dale");
     throwDebris(d, { x: POOL.x + POOL.w - 90, y: POOL.y + POOL.h + 40 }, { x: POOL.x + POOL.w / 2 + 40, y: POOL.y + POOL.h / 2 + 120 }, 1.2);
     items.unshift(d); say("Dale! Don't splash the help!", 3.5);
@@ -825,15 +948,15 @@ function spawnLeaf() {
   throwDebris(d, { x: TREE.x + rand(-40, 60), y: TREE.y + rand(-30, 50) }, to, 1.5); items.push(d);
 }
 function spawnJunk() {
-  const kinds = Object.keys(KINDS).filter(k => KINDS[k].weight > 0 && k !== "leaf");
-  let roll = Math.random() * kinds.reduce((s, k) => s + KINDS[k].weight, 0), kind = "sock";
+  const kinds = G.cfg.junk;
+  let roll = Math.random() * kinds.reduce((s, k) => s + KINDS[k].weight, 0), kind = kinds[0];
   for (const k of kinds) { roll -= KINDS[k].weight; if (roll <= 0) { kind = k; break; } }
-  const x = rand(200, 540); yard.kidX = x; G.kidTime = 0.9;
+  const x = rand(200, 520); yard.kidX = x; G.kidTime = 0.9;
   const d = makeDebris(kind); throwDebris(d, { x, y: FENCE_H - 10 }, randPoolPoint(30), 0.9); items.push(d);
 }
 function wind(dt) {
-  if ((G.gustCd -= dt) <= 0 && G.gustTime <= 0) {
-    G.gustCd = rand(14, 22); G.gustTime = 3; G.gustLeaves = 5;
+  if (G.cfg.gusts && (G.gustCd -= dt) <= 0 && G.gustTime <= 0) {
+    G.gustCd = rand(G.cfg.gusts[0], G.cfg.gusts[1]); G.gustTime = 3; G.gustLeaves = 5;
     const sx = Math.random() < 0.5 ? 1 : -1, sy = rand(-0.3, 0.3), l = Math.hypot(sx, sy);
     G.gustDir = { x: sx / l, y: sy / l }; play("gust", 1, 0.8); say("Ooh, it's getting WINDY!", 2);
   }
@@ -855,7 +978,7 @@ function netCatch() {
       G.tips += d.info.tips; G.frogs++; play("ribbit", 1.2);
       popup(`FROG RESCUED! +$${d.info.tips}`, d.x, d.y - 40, 30, "#ffd23f");
       d.leaving = true; throwDebris(d, d, { x: Math.random() < 0.5 ? -20 : W + 20, y: rand(300, 1100) }, 0.8);
-    } else if (G.contents.length < CAPACITY) {
+    } else if (G.contents.length < G.cap) {
       G.tips += d.info.tips; G.scooped++; G.contents.push(d.kind); d.dead = true;
       play("scoop", rand(0.85, 1.3)); ripples.push({ x: d.x, y: d.y, age: 0 });
       popup(`+$${d.info.tips} ${d.info.name}`, d.x, d.y - 36, 26, "#7ee081");
@@ -874,19 +997,46 @@ function pokeDale(d) {
   say("Leave Dale alone, he's on VACATION!");
   if (navigator.vibrate) navigator.vibrate(60);
 }
+
 function finish(fired) {
   state = "results"; yard.bubbleTime = 0; G.fired = fired; G.finishedAt = performance.now(); G.ext = 0;
   play(fired ? "womp" : "whistle"); musicVolume(0.15);
-  G.rank = RANKS.find(r => G.tips >= r[0]);
-  if (!AUTOPLAY && G.tips > bestTips) { bestTips = G.tips; store.set("best", bestTips); G.newBest = true; }
-  if (AUTOPLAY) window.__result = { fired, tips: G.tips, scooped: G.scooped, frogs: G.frogs, naps: G.naps, time: G.time };
+  G.stars = fired ? 0 : starsFor(G.tips, G.goal);
+  G.passed = G.stars > 0;
+  // Bank only what hasn't been banked yet (a second-chance revive can finish the same shift twice).
+  SAVE.wallet += G.tips - G.banked; G.banked = G.tips;
+  SAVE.shifts++;
+  if (G.passed) {
+    SAVE.stars[G.day] = Math.max(SAVE.stars[G.day] || 0, G.stars);
+    if (G.day + 1 >= SAVE.unlocked) SAVE.unlocked = G.day + 2;
+  }
+  if (G.tips > SAVE.best) { SAVE.best = G.tips; G.newBest = true; }
+  persist();
+  if (AUTOPLAY) window.__result = { fired, tips: G.tips, goal: G.goal, stars: G.stars, scooped: G.scooped, frogs: G.frogs, naps: G.naps, time: G.time };
 }
-
-function updateTitle(dt) {}   // the title screen is purely decorative
+// Rewarded: Mrs. Henderson gives one more chance. Clears most of the junk and resumes the shift.
+function revive() {
+  G.revived = true; G.fired = false; G.grossOver = 0; state = "play"; musicVolume(0.5);
+  for (const d of items) if (d.kind !== "dale" && d.state === "float" && Math.random() < 0.7) { d.dead = true; ripples.push({ x: d.x, y: d.y, age: 0 }); }
+  items = items.filter(d => !d.dead);
+  say("Fine. ONE more chance. Don't make me regret it.", 3);
+}
+async function adThen(fn) { if (busy) return; busy = true; try { await Ads.maybeInterstitial(); fn(); } finally { busy = false; } }
 
 // ========================================================= HUD & SCREENS ==
-const BTN = { quit: [654, 6, 60, 60], yes: [150, 990, 180, 72], no: [390, 990, 180, 72] };
-const inBtn = (b, x, y) => x >= b[0] && x <= b[0] + b[2] && y >= b[1] && y <= b[1] + b[3];
+// Buttons register a hit box every frame; taps check the latest list.
+let hits = [];
+function button(label, x, y, w, h, fn, o = {}) {
+  const dis = !!o.disabled;
+  R(x + 1, y + 1, w, h, "rgba(0,0,0,0.35)");
+  R(x, y, w, h, INK); R(x + 1, y + 1, w - 2, h - 2, dis ? "#585068" : (o.color || WHITE));
+  R(x + 2, y + h - 3, w - 4, 1, dis ? "#484058" : "rgba(0,0,0,0.18)");
+  txt(label, x + w / 2, y + Math.round((h - 7) / 2), dis ? "#9890a8" : (o.ink || INK), { align: "center", scale: o.scale || 1 });
+  if (!dis) hits.push({ x, y, w, h, fn });
+}
+function starsRow(n, x, y, scale = 1) {
+  for (let i = 0; i < 3; i++) txt(i < n ? "★" : "☆", x + i * 9 * scale, y, i < n ? C.yellow : "#706888", { scale, outline: i < n ? INK : null });
+}
 
 // Rolling odometer (like an RPG's HP meter): digits scroll as the value climbs.
 function odometer(x, y, value, digits = 3) {
@@ -903,46 +1053,47 @@ function odometer(x, y, value, digits = 3) {
     g.restore();
   }
 }
+function wallet(x, y) { txt(`$${SAVE.wallet}`, x, y, C.green, { align: "right", scale: 2 }); }
+
 function drawHud(dt) {
   G.shownTips += clamp(G.tips - G.shownTips, -40 * dt, 25 * dt);
-  win(2, 2, 66, 38);
+  win(2, 2, 66, 48);
   txt("TIPS", 8, 7, WHITE);
-  txt("$", 8, 21, C.green, { scale: 1 });
+  txt("$", 8, 21, C.green);
   odometer(15, 18, Math.max(0, G.shownTips));
+  txt(G.goalHit ? "GOAL ✓" : `GOAL $${G.goal}`, 8, 38, G.goalHit ? C.green : "#c8c0e0");
   win(164, 2, 52, 20);
-  const left = Math.max(SHIFT_LENGTH - G.time, 0);
+  const left = Math.max(G.len - G.time, 0);
   txt(`${Math.floor(left / 60)}:${String(Math.floor(left % 60)).padStart(2, "0")}`, 190, 5, left < 15 && (yard.t % 1) < 0.5 ? C.red : WHITE, { align: "center", scale: 2 });
-  win(218, 2, 20, 20); txt("x", 228, 6, WHITE, { align: "center", scale: 2 });
+  win(218, 2, 20, 20); txt("II", 228, 6, WHITE, { align: "center", scale: 2 });
+  if (state === "play") hits.push({ x: 216, y: 0, w: 24, h: 24, fn: () => { state = "pause"; musicVolume(0.15); } });
   win(164, 24, 74, 16);
   txt("GROSS", 169, 28, WHITE);
-  const k = clamp(gross() / GROSS_MAX, 0, 1), bw = 36;
+  const k = clamp(gross() / G.grossMax, 0, 1), bw = 36;
   R(199, 28, bw + 2, 8, WHITE); R(200, 29, bw, 6, INK);
   const col = k < 0.5 ? C.green : k < 0.8 ? C.yellow : C.red;
   R(200, 29, Math.round(bw * k), 6, G.grossOver > 0 && (yard.t % 0.3) < 0.15 ? WHITE : col);
 }
 
 // The dialog window: Mrs. Henderson's remarks type out letter by letter.
-function drawDialog(dt) {
-  let msg = "", typed = Infinity;
-  if (yard.bubbleTime > 0 && yard.bubble) {
-    msg = "• " + yard.bubble;
-    const before = Math.floor(yard.typed);
-    yard.typed += dt * 40; typed = Math.floor(yard.typed);
-    if (typed !== before && typed < msg.length && msg[typed] !== " " && typed % 2 === 0) play("blip", 1, 0.25);
-  } else if (G && G.time < 16) msg = "• Tap junk to send Pool Boy after it. Tap again to cancel. Full net? He dumps it himself.";
-  if (!msg) return;
+function drawDialog(dt, y0 = 362) {
+  if (!(yard.bubbleTime > 0 && yard.bubble)) return;
+  const msg = "• " + yard.bubble;
+  const before = Math.floor(yard.typed);
+  yard.typed += dt * 40; const typed = Math.floor(yard.typed);
+  if (typed !== before && typed < msg.length && msg[typed] !== " " && typed % 2 === 0) play("blip", 1, 0.25);
   const lines = wrapPx(msg, 222);
-  win(3, 362, 234, 14 + lines.length * 11);
+  win(3, y0, 234, 14 + lines.length * 11);
   let left = typed;
   lines.forEach((l, i) => {
     const shown = left >= l.length ? l : l.slice(0, Math.max(0, left));
     left -= l.length + 1;
-    if (shown) txt(shown, 10, 369 + i * 11, WHITE);
+    if (shown) txt(shown, 10, y0 + 7 + i * 11, WHITE);
   });
 }
 
 function drawQueue(dt) {
-  if (state === "play") G.queue.forEach((d, i) => {
+  if (state === "play" || state === "pause") G.queue.forEach((d, i) => {
     const cx = px(d.x), cy = px(d.y), pulse = i === 0 && (yard.t % 0.5) < 0.25 ? 1 : 0;
     ringPx(cx, cy, Math.round(d.r / 3) + 5 + pulse, i === 0 ? C.yellow : WHITE);
     const my = cy - Math.round(d.r / 3) - 14;
@@ -959,21 +1110,18 @@ function drawWorld(dt) {
   drawWater();
   for (const d of items) if (d.kind === "dale") drawDebris(d);
   for (const d of items) if (d.kind !== "dale") drawDebris(d);
-  drawQueue(dt);
-  drawBoy(boy);
+  if (G) { drawQueue(dt); drawBoy(boy); }
   if (yard.kidX >= 0) {
     const kx = px(yard.kidX);
     g.drawImage(SPR.kid, kx - 5, 7);
     R(kx - 8, 15, 3, 3, INK); R(kx + 6, 15, 3, 3, INK); R(kx - 7, 15, 2, 2, "#f8c890"); R(kx + 6, 15, 2, 2, "#f8c890");
   }
   g.drawImage(fenceLayer, 0, 0);
-  // trash can (glows when the net is full)
   const bx = px(BIN.x), by = px(BIN.y);
   oval(bx, by + 5, 8, 2, "rgba(0,0,0,0.3)");
   if (yard.binGlow && (yard.t % 0.4) < 0.2) { ringPx(bx, by, 12, C.yellow); ringPx(bx, by, 13, C.yellow); }
   g.drawImage(SPR.bin, bx - 7, by - 6);
   drawMrsHenderson();
-  // tree canopy on top (dithered when you're under it)
   g.drawImage(yard.canopyAlpha < 0.7 ? canopyDither : canopy, px(TREE.x) - 40, px(TREE.y) - 52);
   const wl = Math.hypot(yard.wind.x, yard.wind.y);
   if (wl > 20) {
@@ -1014,8 +1162,6 @@ function drawTitle() {
   win(28, 152, 184, 34);
   txt("Skim the pool. Dodge Uncle Dale.", RW / 2, 159, WHITE, { align: "center" });
   txt("Survive Mrs. Henderson.", RW / 2, 171, WHITE, { align: "center" });
-  // Pool Boy struts in place, with junk orbiting him
-  const tb = { x: W / 2, y: 820, ang: Math.PI / 2, moving: true, walk: t * 12, contents: [], stun: 0, head: { x: W / 2, y: 900 } };
   const spr = BOY.down[Math.floor(t * 4) % 2];
   oval(RW / 2, 276, 14, 4, "rgba(0,0,0,0.3)");
   g.drawImage(spr, RW / 2 - spr.width * 1.5, 276 - spr.height * 3, spr.width * 3, spr.height * 3);
@@ -1024,38 +1170,130 @@ function drawTitle() {
     g.drawImage(s, Math.round(RW / 2 + Math.cos(a) * 62 - s.width / 2), Math.round(244 + Math.sin(a) * 26 - s.height / 2));
   });
   if ((t % 1) < 0.65) txt("TAP TO START", RW / 2, 306, WHITE, { align: "center", scale: 2, outline: INK });
-  win(14, 336, 212, 50);
-  txt("• Tap junk to send Pool Boy after it.", 22, 344, WHITE);
-  txt("• Queue up to 3 at a time.", 22, 356, WHITE);
-  txt(bestTips > 0 ? `• Best shift: $${bestTips}` : "• Don't poke Uncle Dale.", 22, 368, WHITE);
+  hits.push({ x: 0, y: 0, w: RW, h: RH, fn: toBoard });
+  win(14, 336, 212, 38);
+  txt(SAVE.unlocked > 1 ? `• Day ${SAVE.unlocked} awaits.` : "• Tap junk to send Pool Boy after it.", 22, 344, WHITE);
+  txt(SAVE.best > 0 ? `• Best shift: $${SAVE.best}` : "• Don't poke Uncle Dale.", 22, 356, WHITE);
+}
+
+function header(title) {
+  win(4, 4, 232, 28);
+  txt(title, 12, 11, WHITE, { scale: 2 });
+  wallet(228, 11);
+}
+
+function drawBoard() {
+  battleBg(yard.t * 0.5, 0.45);
+  header("JOB BOARD");
+  const rows = 9, total = SAVE.unlocked + 1, top = clamp(boardTop, 0, Math.max(0, total - rows));
+  boardTop = top;
+  win(4, 36, 232, 8 + rows * 30);
+  for (let r = 0; r < rows; r++) {
+    const day = top + r; if (day >= total) break;
+    const y = 41 + r * 30, locked = day >= SAVE.unlocked, cfg = dayConfig(day);
+    if (locked) {
+      R(9, y, 222, 26, "#201c30");
+      txt(`DAY ${day + 1}`, 15, y + 4, "#706888");
+      txt("Pass the day before to unlock", 15, y + 15, "#706888");
+      continue;
+    }
+    const isNext = day === SAVE.unlocked - 1;
+    R(9, y, 222, 26, isNext ? "#2c2450" : "#181428");
+    if (isNext && (yard.t % 1) < 0.5) txt("▶", 12, y + 9, C.yellow);
+    txt(`DAY ${day + 1}`, 20, y + 4, isNext ? C.yellow : WHITE);
+    txt(cfg.name, 20, y + 15, "#c8c0e0");
+    starsRow(SAVE.stars[day] || 0, 196, y + 4);
+    txt(`Goal $${cfg.goal}`, 226, y + 16, "#9890b8", { align: "right" });
+    hits.push({ x: 9, y, w: 222, h: 26, fn: () => toIntro(day) });
+  }
+  const yb = 48 + rows * 30;
+  if (top > 0) button("▲", 182, yb, 24, 18, () => boardTop -= rows - 1);
+  if (top + rows < total) button("▼", 210, yb, 24, 18, () => boardTop += rows - 1);
+  button("POOL SUPPLY STORE", 6, yb, 140, 22, toStore, { color: C.yellow });
+  button("TITLE", 6, yb + 28, 60, 18, toTitle);
+}
+
+function drawStore() {
+  battleBg(yard.t * 0.5, 0.45);
+  header("POOL SUPPLY");
+  UPG.forEach((u, i) => {
+    const y = 38 + i * 54, lvl = SAVE.up[u.id] || 0, maxed = lvl >= u.costs.length, cost = u.costs[lvl];
+    win(4, y, 232, 50);
+    txt(u.name, 12, y + 8, C.yellow);
+    txt(u.desc, 12, y + 20, "#c8c0e0");
+    for (let p = 0; p < u.costs.length; p++) { R(12 + p * 10, y + 33, 8, 8, INK); R(13 + p * 10, y + 34, 6, 6, p < lvl ? C.green : "#383050"); }
+    if (maxed) txt("MAXED", 222, y + 34, C.green, { align: "right" });
+    else button(`BUY $${cost}`, 160, y + 28, 70, 16, () => {
+      if (SAVE.wallet < cost) { play("hey", 1.4, 0.5); popup("Not enough tips!", 600, 120 + i * 162, 26, "#ff5a5a"); return; }
+      SAVE.wallet -= cost; SAVE.up[u.id] = lvl + 1; persist();
+      play("dump", 1.4, 0.7); popup(`${u.name}!`, 360, 140 + i * 162, 30, "#7ee081");
+    }, { disabled: SAVE.wallet < cost, color: C.green });
+  });
+  button("BACK", 6, 312, 60, 20, toBoard);
+  win(4, 338, 232, 26);
+  txt("Every shift pays tips, even a bad one.", RW / 2, 347, "#c8c0e0", { align: "center" });
+}
+
+function drawIntro(dt) {
+  const cfg = dayConfig(introDay);
+  drawWorld(dt);
+  R(0, 0, RW, RH, "rgba(8,8,24,0.45)");
+  win(20, 60, 200, 116);
+  txt(`DAY ${introDay + 1}`, RW / 2, 70, C.yellow, { align: "center", scale: 2 });
+  txt(cfg.name, RW / 2, 90, WHITE, { align: "center" });
+  txt(`Goal: $${cfg.goal}`, RW / 2, 106, C.green, { align: "center", scale: 2 });
+  txt(`Shift: ${Math.floor(cfg.len / 60)}:${String(cfg.len % 60).padStart(2, "0")}`, RW / 2, 126, WHITE, { align: "center" });
+  txt(`★ $${cfg.goal}   ★★ $${Math.ceil(cfg.goal * 1.4)}   ★★★ $${Math.ceil(cfg.goal * 1.8)}`, RW / 2, 140, "#c8c0e0", { align: "center" });
+  starsRow(SAVE.stars[introDay] || 0, RW / 2 - 13, 154);
+  button("START SHIFT", 60, 190, 120, 26, () => newGame(introDay), { color: C.yellow, scale: 1 });
+  button("BACK", 90, 224, 60, 18, toBoard);
+  drawDialog(dt, 300);
+}
+
+function drawPause(dt) {
+  drawWorld(0); drawHud(0);
+  R(0, 0, RW, RH, "rgba(8,8,24,0.5)");
+  win(40, 150, 160, 110);
+  txt("PAUSED", RW / 2, 160, WHITE, { align: "center", scale: 2 });
+  button("RESUME", 60, 186, 120, 22, () => { state = "play"; musicVolume(0.5); }, { color: C.yellow });
+  button("QUIT SHIFT", 60, 216, 120, 22, () => adThen(toBoard));
 }
 
 function drawResults() {
   const t = yard.t, since = (performance.now() - G.finishedAt) / 1000;
-  battleBg(t, 0.25);
-  win(20, 30, 200, 30);
-  txt(G.fired ? "YOU'RE FIRED!" : "SHIFT OVER!", RW / 2, 38, G.fired ? C.red : WHITE, { align: "center", scale: 2 });
-  win(20, 68, 200, 130);
-  txt("TIPS", 32, 78, WHITE);
-  txt("$", 32, 94, C.green);
-  const shown = Math.min(G.tips, since * 120);
-  odometer(40, 90, shown);
-  const rank = G.fired ? "Terminated for Gross Negligence" : G.rank[1];
-  txt(rank, RW / 2, 116, C.yellow, { align: "center" });
-  txt(G.newBest ? "NEW BEST!" : `Best: $${bestTips}`, RW / 2, 130, WHITE, { align: "center" });
-  [`Junk scooped ...... ${G.scooped}`, `Frogs rescued ..... ${G.frogs}`, `Naps ruined ....... ${G.naps}`].forEach((s, i) =>
-    txt(s, 36, 148 + i * 13, WHITE));
-  const quote = "• Mrs. Henderson: " + (G.fired ? "“I've seen cleaner swamps.”" : G.rank[2]);
-  const lines = wrapPx(quote, 186);
-  win(20, 206, 200, 14 + lines.length * 11);
-  lines.forEach((l, i) => txt(l, 28, 213 + i * 11, WHITE));
-  if (since > 1) {
-    win(40, 316, 160, 42);
-    txt("Try another shift?", RW / 2, 324, WHITE, { align: "center" });
-    const blink = (t % 0.6) < 0.4;
-    txt((blink ? "▶" : " ") + "Yes", 62, 340, WHITE);
-    txt("No", 140, 340, WHITE);
+  battleBg(t, 0.3);
+  const title = G.fired ? "YOU'RE FIRED!" : G.passed ? "GOAL MET!" : "SHIFT OVER";
+  win(12, 8, 216, 28);
+  txt(title, RW / 2, 15, G.fired ? C.red : G.passed ? C.yellow : WHITE, { align: "center", scale: 2 });
+  win(12, 40, 216, 104);
+  txt(`DAY ${G.day + 1}: ${G.cfg.name}`, 20, 48, "#c8c0e0");
+  txt("TIPS", 20, 62, WHITE); txt("$", 20, 78, C.green);
+  odometer(28, 74, Math.min(G.tips, since * 120));
+  txt(`Goal $${G.goal}`, 220, 64, G.passed ? C.green : "#c8c0e0", { align: "right" });
+  if (since > 0.6) starsRow(G.stars, 167, 78, 1);
+  txt(G.passed || G.fired ? "" : `Short by $${G.goal - G.tips}`, 220, 92, C.red, { align: "right" });
+  txt(`Scooped ${G.scooped}   Frogs ${G.frogs}   Naps ruined ${G.naps}`, 20, 104, WHITE);
+  txt(G.newBest ? "NEW BEST SHIFT!" : `Wallet: $${SAVE.wallet}`, 20, 118, G.newBest ? C.yellow : C.green);
+  if (G.doubled) txt("Tips doubled!", 220, 118, C.yellow, { align: "right" });
+  const quote = "• Mrs. Henderson: " + QUOTES[G.fired ? "fired" : G.stars];
+  const lines = wrapPx(quote, 200);
+  win(12, 148, 216, 14 + lines.length * 11);
+  lines.forEach((l, i) => txt(l, 20, 155 + i * 11, WHITE));
+  if (since < 1) return;
+  let y = 196;
+  if (G.fired && !G.revived) {
+    button("▶ AD  Second chance", 30, y, 180, 24, async () => { if (busy) return; busy = true; const ok = await Ads.rewarded(); busy = false; if (ok) revive(); }, { color: C.yellow }); y += 30;
   }
+  if (!G.fired && !G.doubled && G.tips > 0) {
+    button(`▶ AD  Double tips (+$${G.tips})`, 30, y, 180, 24, async () => {
+      if (busy) return; busy = true; const ok = await Ads.rewarded(); busy = false;
+      if (ok) { G.doubled = true; SAVE.wallet += G.tips; persist(); play("dump", 1.3); }
+    }, { color: C.yellow }); y += 30;
+  }
+  if (G.passed) { button(`NEXT: DAY ${G.day + 2} ▶`, 30, y, 180, 24, () => adThen(() => toIntro(G.day + 1)), { color: C.green }); y += 30; }
+  button("RETRY", 30, y, 56, 20, () => { const d = G.day; adThen(() => newGame(d)); });
+  button("JOBS", 92, y, 56, 20, () => adThen(toBoard));
+  button("STORE", 154, y, 56, 20, () => adThen(toStore));
 }
 
 // ================================================================== FRAME ==
@@ -1065,11 +1303,15 @@ function frame(now) {
   yard.t += dt; yard.bubbleTime = Math.max(yard.bubbleTime - dt, 0);
   ripples = ripples.filter(r => (r.age += dt) < 1.2);
   if (state === "play") updatePlay(dt);
-  else if (state === "title") updateTitle(dt);
-  else for (const d of items) updateDebris(d, dt, { x: 0, y: 0 });
+  else if (state === "results") for (const d of items) updateDebris(d, dt, { x: 0, y: 0 });
 
+  hits = [];
   if (state === "title") drawTitle();
+  else if (state === "board") drawBoard();
+  else if (state === "store") drawStore();
+  else if (state === "intro") drawIntro(dt);
   else if (state === "results") drawResults();
+  else if (state === "pause") drawPause(dt);
   else { drawWorld(dt); drawHud(dt); drawDialog(dt); }
   drawPopups(dt);
 
@@ -1086,48 +1328,59 @@ function toLogical(e) {
   const r = cv.getBoundingClientRect();
   return { x: (e.clientX - r.left - view.ox) / view.s, y: (e.clientY - r.top - view.oy) / view.s };
 }
+const hitAt = p => { const x = p.x / PX, y = p.y / PX; for (let i = hits.length - 1; i >= 0; i--) { const b = hits[i]; if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) return b; } return null; };
 cv.addEventListener("pointerdown", e => {
   e.preventDefault(); cv.focus();
-  if (state !== "play") return;
+  if (state !== "play" || busy) return;
   const p = toLogical(e);
-  if (inBtn(BTN.quit, p.x, p.y)) return;
-  tapAt(p);   // act on touch-down for responsiveness
+  if (hitAt(p)) return;   // HUD buttons act on release
+  tapAt(p);               // gameplay taps act on touch-down for responsiveness
 }, { passive: false });
 cv.addEventListener("pointerup", e => {
   e.preventDefault(); unlockAudio();
-  const p = toLogical(e);
-  if (state === "play") { if (inBtn(BTN.quit, p.x, p.y)) newTitle(); return; }
-  if (state === "title") { newGame(); return; }
-  if (state === "results" && performance.now() - G.finishedAt > 1000) {
-    if (inBtn(BTN.yes, p.x, p.y)) newGame();
-    else if (inBtn(BTN.no, p.x, p.y)) newTitle();
-  }
+  if (busy) return;
+  const b = hitAt(toLogical(e));
+  if (b) { if (state !== "play") play("tick", 1.2, 0.5); b.fn(); }
 }, { passive: false });
 for (const ev of ["touchstart", "touchmove", "touchend", "gesturestart", "dblclick", "contextmenu"]) {
   cv.addEventListener(ev, e => { e.preventDefault(); if (ev === "touchend") unlockAudio(); }, { passive: false });
 }
 window.addEventListener("keydown", e => {
   const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-  if (k === "Escape") { if (state !== "title") newTitle(); return; }
+  if (k === "Escape") { if (state === "play") state = "pause"; else if (state === "pause") state = "play"; return; }
   if ([" ", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(k)) e.preventDefault();
   keys.add(k);
   if (e.repeat) return;
-  if (k === " " || k === "Enter") {
+  if ((k === " " || k === "Enter") && state !== "play") {
     unlockAudio();
-    if (state === "title") newGame();
-    else if (state === "results" && performance.now() - G.finishedAt > 1000) newGame();
+    if (state === "title") toBoard();
+    else if (state === "board") toIntro(SAVE.unlocked - 1);
+    else if (state === "intro") newGame(introDay);
   }
 });
 window.addEventListener("keyup", e => keys.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key));
 window.addEventListener("blur", () => keys.clear());
 document.addEventListener("visibilitychange", () => {
+  if (document.hidden && state === "play") state = "pause";   // never lose a shift to a phone call
   if (document.hidden && actx) actx.suspend().catch(() => {});
   else if (!document.hidden && actx) actx.resume().catch(() => {});
 });
 
+// ======================================================= BALANCE HARNESS ==
+// Simulates a whole shift with the bot, without rendering (for tuning goals).
+window.__sim = (day, up = null) => {
+  const saved = JSON.stringify(SAVE), was = botOn; botOn = true;
+  if (up) Object.assign(SAVE.up, up);
+  newGame(day);
+  while (state === "play") updatePlay(1 / 30);
+  const r = { day: day + 1, tips: G.tips, goal: G.goal, stars: G.stars, fired: G.fired, t: Math.round(G.time) };
+  Object.assign(SAVE, JSON.parse(saved)); botOn = was; toBoard();
+  return r;
+};
+
 // ================================================================== BOOT ==
 resize();
-newTitle();
-if (AUTOPLAY) newGame();
+toTitle();
+if (AUTOPLAY) newGame(5);
 requestAnimationFrame(frame);
 </script>
