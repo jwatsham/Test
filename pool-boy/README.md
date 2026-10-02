@@ -35,9 +35,9 @@ and a built-in bitmap font. The UI is retro-RPG style too: black bordered window
 tips odometer, typewriter dialog, and swirling title and results backgrounds.
 
 **Progression.** A Job Board of days, each a shift with a tips goal (1 to 3 stars at 1x,
-1.4x and 1.8x the goal). Passing a day unlocks the next. Days 1 to 7 each introduce one
-thing (basics, leaf season, frogs, Uncle Dale, wind, a pool party, a stricter gross limit),
-then endless days keep scaling. All tips go into a wallet for the Pool Supply store:
+1.4x and 1.8x the goal). Passing a day unlocks the next. The 14 story days introduce one
+thing at a time (basics, leaf season, frogs, Uncle Dale, wind, a pool party, a stricter
+gross limit), each followed by a gentler day to settle in, then endless days keep scaling. All tips go into a wallet for the Pool Supply store:
 Bigger Net, Fast Flip-Flops, Longer Pole, Clipboard (queue size), and Pool Chemicals
 (junk counts as less gross). Day data is `DAYS` and upgrades are `UPG` in the script.
 Progress saves in the browser's local storage.

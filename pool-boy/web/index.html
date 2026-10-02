@@ -657,18 +657,33 @@ function updateDebris(d, dt, wind, onLand) {
 // Each day introduces one new thing. Goals are tips needed to pass; stars at 1x / 1.4x / 1.8x the goal.
 const ALL_JUNK = ["sock", "duck", "pizza", "toupee", "phone", "ball", "bandaid"];
 const DAYS = [
+  // Each new thing gets its own day, followed by a gentler day to settle into it.
   { name: "First Day on the Job", len: 60, goal: 20, rate: [3.4, 2.4], leafShare: 0.6, junk: ["sock", "duck"],
     intro: "Welcome aboard, hon! Tap junk in the pool and you'll fetch it. When your net's full, you dump it in the trash." },
-  { name: "Leaf Season", len: 75, goal: 30, rate: [3.0, 2.0], leafShare: 0.7, junk: ["sock", "duck", "pizza"],
+  { name: "Getting the Hang of It", len: 70, goal: 25, rate: [3.3, 2.3], leafShare: 0.6, junk: ["sock", "duck"],
+    intro: "Not bad for a rookie. Same as yesterday. Tap a few at once and you'll fetch them in order." },
+  { name: "Leaf Season", len: 75, goal: 30, rate: [3.1, 2.1], leafShare: 0.7, junk: ["sock", "duck", "pizza"],
     intro: "That oak tree is shedding like crazy. Leaves are cheap, but they add up. Keep up!" },
-  { name: "The Frog Situation", len: 90, goal: 40, rate: [3.0, 1.8], leafShare: 0.5, junk: ["sock", "duck", "pizza", "phone"], frogs: true,
+  { name: "Lazy Sunday", len: 80, goal: 34, rate: [3.1, 2.0], leafShare: 0.65, junk: ["sock", "duck", "pizza"],
+    intro: "Quiet day. Use it to practice. And maybe spend some tips at the Pool Supply store." },
+  { name: "The Frog Situation", len: 85, goal: 38, rate: [3.0, 1.95], leafShare: 0.55, junk: ["sock", "duck", "pizza", "phone"], frogs: true,
     intro: "Frogs keep hopping in. Rescue them! They don't take up net space, and I pay $10 a frog." },
-  { name: "Uncle Dale's Visit", len: 100, goal: 50, rate: [2.9, 1.6], leafShare: 0.5, junk: ["sock", "duck", "pizza", "phone", "toupee"], frogs: true, dale: true,
+  { name: "Ribbit Rerun", len: 90, goal: 42, rate: [3.0, 1.9], leafShare: 0.55, junk: ["sock", "duck", "pizza", "phone"], frogs: true,
+    intro: "The frogs are back. I think they like you." },
+  { name: "Uncle Dale's Visit", len: 95, goal: 46, rate: [3.0, 1.85], leafShare: 0.5, junk: ["sock", "duck", "pizza", "phone", "toupee"], frogs: true, dale: true,
     intro: "My brother Dale is napping on his floatie. Do NOT wake him. Junk near Dale can wait." },
-  { name: "Windy Wednesday", len: 110, goal: 60, rate: [2.9, 1.5], leafShare: 0.55, junk: ALL_JUNK, frogs: true, dale: true, gusts: [8, 13],
+  { name: "Dale's Still Here", len: 100, goal: 50, rate: [2.95, 1.8], leafShare: 0.5, junk: ["sock", "duck", "pizza", "phone", "toupee"], frogs: true, dale: true,
+    intro: "Dale said he'd stay one night. That was a week ago." },
+  { name: "Breezy Morning", len: 100, goal: 54, rate: [2.95, 1.7], leafShare: 0.55, junk: ["sock", "duck", "pizza", "phone", "toupee", "ball"], frogs: true, dale: true, gusts: [16, 24],
+    intro: "A little breeze today. Every so often a gust pushes junk around. Lovely for drying laundry." },
+  { name: "Windy Wednesday", len: 105, goal: 58, rate: [2.9, 1.6], leafShare: 0.55, junk: ALL_JUNK, frogs: true, dale: true, gusts: [9, 14],
     intro: "Big winds today. Gusts blow junk all over and shake loose more leaves." },
-  { name: "Pool Party!", len: 120, goal: 75, rate: [2.4, 1.2], leafShare: 0.4, junk: ALL_JUNK, frogs: true, dale: true, gusts: [14, 22],
+  { name: "Backyard BBQ", len: 110, goal: 64, rate: [2.8, 1.45], leafShare: 0.45, junk: ALL_JUNK, frogs: true, dale: true, gusts: [14, 22],
+    intro: "Just a small barbecue. A few friends. Practice for the big party." },
+  { name: "Pool Party!", len: 120, goal: 72, rate: [2.5, 1.3], leafShare: 0.4, junk: ALL_JUNK, frogs: true, dale: true, gusts: [14, 22],
     intro: "I'm throwing a pool party! Expect pizza. Expect socks. Expect... everything." },
+  { name: "Book Club Rehearsal", len: 120, goal: 76, rate: [2.6, 1.3], leafShare: 0.5, junk: ALL_JUNK, frogs: true, dale: true, gusts: [14, 22], grossMul: 0.85,
+    intro: "Tomorrow the book club inspects. Today we practice being SPOTLESS. Less gross allowed." },
   { name: "Book Club Inspection", len: 120, goal: 80, rate: [2.6, 1.25], leafShare: 0.5, junk: ALL_JUNK, frogs: true, dale: true, gusts: [14, 22], grossMul: 0.75,
     intro: "The book club arrives at four. The pool must be SPOTLESS. My standards are lower than usual. I mean higher." },
 ];
@@ -682,8 +697,8 @@ function dayConfig(i) {
   if (i < DAYS.length) return { frogs: false, dale: false, gusts: null, grossMul: 1, ...DAYS[i] };
   const n = i - DAYS.length + 1, last = DAYS[DAYS.length - 1], m = ENDLESS[(n - 1) % ENDLESS.length];
   return { ...last, gusts: m.gusts || last.gusts, grossMul: m.grossMul || 1, name: m.name, intro: m.intro, len: 120,
-    goal: Math.round(last.goal + n * 10),
-    rate: [Math.max(1.7, last.rate[0] - n * 0.05), Math.max(0.85, (last.rate[1] - n * 0.03) * (m.rateMul || 1))] };
+    goal: Math.round(last.goal + n * 5),
+    rate: [Math.max(1.7, last.rate[0] - n * 0.025), Math.max(0.85, (last.rate[1] - n * 0.015) * (m.rateMul || 1))] };
 }
 const starsFor = (tips, goal) => tips >= goal * 1.8 ? 3 : tips >= goal * 1.4 ? 2 : tips >= goal ? 1 : 0;
 
@@ -697,6 +712,15 @@ const UPG = [
 ];
 const SAVE = Object.assign({ unlocked: 1, stars: [], wallet: 0, up: { net: 0, shoes: 0, pole: 0, clip: 0, chem: 0 }, best: 0, shifts: 0 }, store.get("save", {}));
 SAVE.best = Math.max(SAVE.best, bestTips);
+// Save v1 had 7 story days; v2 has 14. Map old day numbers onto the new list so nobody loses progress.
+if (!SAVE.v) {
+  const oldToNew = i => (i < 7 ? [0, 2, 4, 6, 9, 11, 13][i] : 14 + (i - 7));
+  const stars = [];
+  SAVE.stars.forEach((n, i) => { if (n) stars[oldToNew(i)] = n; });
+  SAVE.stars = stars;
+  if (SAVE.unlocked > 1) SAVE.unlocked = oldToNew(SAVE.unlocked - 1) + 1;
+  SAVE.v = 2;
+}
 let botOn = AUTOPLAY;   // test bot (also drives the balance simulator)
 function persist() { if (!botOn) store.set("save", SAVE); }
 const stat = id => { const u = UPG.find(u => u.id === id); return u.vals[SAVE.up[id] || 0]; };
