@@ -1,12 +1,10 @@
 <title>Pool Boy</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Nunito:wght@800&display=swap">
 <style>
-/* Layout: one full-viewport canvas; a fixed 720x1280 portrait backyard is letterboxed inside it. */
+/* Layout: one full-viewport canvas. The game renders into a 240x427 pixel buffer
+   (a SNES-sized screen, in portrait) that is scaled up with nearest-neighbor. */
 :root {
-  --bg: #3f7a34;   /* lawn shade for the letterbox */
-  --fg: #fff6d5;
+  --bg: #100c18;   /* letterbox: dark, like the space around a CRT picture */
+  --fg: #f8f8f8;
   color-scheme: dark;
 }
 html, body { height: 100%; }
@@ -30,13 +28,12 @@ body {
 "use strict";
 // ============================================================================
 // Pool Boy (web / portrait). Port of the Godot prototype in pool-boy/.
-// All art is drawn on a canvas; all audio is synthesized at load time.
+// Art style: 16-bit suburban RPG (EarthBound-inspired; all art is original).
+// Gameplay runs in a 720x1280 logical space; everything is drawn into a
+// 240x427 pixel buffer (1 pixel = 3 logical units) and scaled up crisply.
 // ============================================================================
 
 const W = 720, H = 1280, TAU = Math.PI * 2;
-const OUT = "#1f1a29";
-const DISPLAY = '"Lilita One", "Arial Black", Impact, sans-serif';
-const BODY = 'Nunito, "Arial Rounded MT Bold", "Helvetica Neue", Arial, sans-serif';
 const AUTOPLAY = location.hash === "#autoplay";
 
 // ----------------------------------------------------------------- tuning --
@@ -51,7 +48,7 @@ const rectGrow = (r, g) => ({ x: r.x - g, y: r.y - g, w: r.w + 2 * g, h: r.h + 2
 const POOL = { x: 150, y: 250, w: 420, h: 760 };
 const DECK = rectGrow(POOL, 70);
 const LOOP = rectGrow(POOL, PLAYER_R + 4);   // the line Pool Boy's feet walk along
-const BIN = { x: 112, y: 1048 }, TREE = { x: 58, y: 150 }, HOME = { x: 628, y: 1172 };
+const BIN = { x: 112, y: 1048 }, TREE = { x: 58, y: 150 }, HOME = { x: 681, y: 870 };
 const FENCE_H = 130;
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -130,6 +127,7 @@ const RAW = {
   whistle: sfx(0.8, b => { let ph = 0; for (let i = 0; i < b.length; i++) { const t = i / RATE; ph += TAU * (2300 + 120 * Math.sin(TAU * 28 * t)) / RATE; b[i] = Math.sin(ph) * Math.min(t * 40, 1) * Math.min((0.8 - t) * 10, 1) * 0.25; } }),
   womp: sfx(1.0, b => { let ph = 0; for (let i = 0; i < b.length; i++) { const t = i / RATE; const f = t < 0.2 ? 330 : t < 0.4 ? 311 : t < 0.6 ? 294 : 277 - (t - 0.6) * 40; ph += TAU * f * (1 + 0.02 * Math.sin(TAU * 6 * t)) / RATE; const gap = (t % 0.2) < 0.015 && t < 0.65 ? 0.3 : 1; b[i] = Math.tanh(Math.sin(ph) * 3) * gap * Math.min((1 - t) * 5, 1) * 0.28; } }),
   tick: sfx(0.07, b => { for (let i = 0; i < b.length; i++) { const t = i / RATE; b[i] = Math.sin(TAU * 1050 * t) * Math.exp(-t * 60) * 0.4; } }),
+  blip: sfx(0.035, b => { for (let i = 0; i < b.length; i++) { const t = i / RATE; b[i] = (Math.sin(TAU * 620 * t) > 0 ? 0.25 : -0.25) * (1 - t / 0.035); } }),
   gust: sfx(1.2, b => { _seed = 5; let lp = 0; for (let i = 0; i < b.length; i++) { const t = i / RATE; lp += (nz() - lp) * 0.05; b[i] = lp * Math.sin(Math.PI * t / 1.2) * 1.4; } }),
 };
 
@@ -162,9 +160,14 @@ function play(name, rate = 1, vol = 1) {
 }
 function musicVolume(v) { if (musicGain) musicGain.gain.setTargetAtTime(v, actx.currentTime, 0.2); }
 
-// ================================================================ DRAWING ==
+// ============================================================ PIXEL CANVAS ==
+const PX = 3, RW = 240, RH = 427;
 const cv = document.getElementById("game");
 const c = cv.getContext("2d");
+const lo = document.createElement("canvas"); lo.width = RW; lo.height = RH;
+const g = lo.getContext("2d");
+g.imageSmoothingEnabled = false;
+const px = v => Math.round(v / PX);
 let view = { s: 1, ox: 0, oy: 0, dpr: 1 };
 function resize() {
   const r = cv.getBoundingClientRect(), dpr = Math.min(window.devicePixelRatio || 1, 3);
@@ -174,116 +177,415 @@ function resize() {
 }
 window.addEventListener("resize", resize);
 
-function circle(x, y, r, col) { c.beginPath(); c.arc(x, y, Math.max(r, 0), 0, TAU); c.fillStyle = col; c.fill(); }
-function ellipse(x, y, rx, ry, col) { c.beginPath(); c.ellipse(x, y, rx, ry, 0, 0, TAU); c.fillStyle = col; c.fill(); }
-function line(x1, y1, x2, y2, col, w, cap = "round") { c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.strokeStyle = col; c.lineWidth = w; c.lineCap = cap; c.stroke(); }
-function poly(p, col) { c.beginPath(); c.moveTo(p[0], p[1]); for (let i = 2; i < p.length; i += 2) c.lineTo(p[i], p[i + 1]); c.closePath(); c.fillStyle = col; c.fill(); }
-function ring(x, y, r, col, w, a0 = 0, a1 = TAU) { c.beginPath(); c.arc(x, y, r, a0, a1); c.strokeStyle = col; c.lineWidth = w; c.lineCap = "round"; c.stroke(); }
-function rect(x, y, w, h, col) { c.fillStyle = col; c.fillRect(x, y, w, h); }
-function rrect(x, y, w, h, r, col) { c.beginPath(); c.roundRect ? c.roundRect(x, y, w, h, r) : c.rect(x, y, w, h); c.fillStyle = col; c.fill(); }
-function text(s, x, y, size, col, o = {}) {
-  c.font = `${size}px ${o.font || DISPLAY}`;
-  c.textAlign = o.align || "left"; c.textBaseline = o.base || "alphabetic";
-  const ow = o.outline === undefined ? size * 0.2 : o.outline;
-  if (ow > 0) { c.lineJoin = "round"; c.lineWidth = ow; c.strokeStyle = OUT; c.strokeText(s, x, y); }
-  c.fillStyle = col; c.fillText(s, x, y);
+// Palette: soft suburban pastels with near-black ink outlines.
+const INK = "#181020", WHITE = "#f8f8f8";
+const C = {
+  grass: "#78c050", grassD: "#58a040", grassL: "#98d868", neighbor: "#58983c",
+  deck: "#f0d8a8", deckD: "#e0c088", grout: "#c8a070",
+  coping: "#f8f0e0", copingD: "#d0c0a0",
+  water: "#58c0f0", waterD: "#40a0e0", wall: "#2878c0", wallD: "#1c5ca0", sparkle: "#d8f8ff",
+  fence: "#e0a060", fenceD: "#b07038", fenceDD: "#784820",
+  canopy: "#40a048", canopyD: "#2c7838", canopyL: "#70c860", trunk: "#885028",
+  yellow: "#f8d840", red: "#e84838", green: "#78e070", blue: "#5890f8",
+};
+
+function R(x, y, w, h, col) { g.fillStyle = col; g.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h)); }
+function disc(cx, cy, r, col) {
+  g.fillStyle = col; cx = Math.round(cx); cy = Math.round(cy);
+  for (let dy = -r; dy <= r; dy++) { const w = Math.floor(Math.sqrt(r * r - dy * dy + r * 0.6)); g.fillRect(cx - w, cy + dy, 2 * w + 1, 1); }
 }
-function wrap(s, maxW, size, font) {
-  c.font = `${size}px ${font}`;
+function oval(cx, cy, rx, ry, col) {
+  g.fillStyle = col; cx = Math.round(cx); cy = Math.round(cy);
+  for (let dy = -ry; dy <= ry; dy++) { const w = Math.round(rx * Math.sqrt(Math.max(0, 1 - (dy / (ry + 0.5)) ** 2))); g.fillRect(cx - w, cy + dy, 2 * w + 1, 1); }
+}
+function ringPx(cx, cy, r, col) {
+  g.fillStyle = col; cx = Math.round(cx); cy = Math.round(cy); r = Math.round(r);
+  let x = r, y = 0, e = 1 - r;
+  while (x >= y) {
+    for (const [a, b] of [[x, y], [y, x], [-y, x], [-x, y], [-x, -y], [-y, -x], [y, -x], [x, -y]]) g.fillRect(cx + a, cy + b, 1, 1);
+    y++; if (e < 0) e += 2 * y + 1; else { x--; e += 2 * (y - x) + 1; }
+  }
+}
+function linePx(x0, y0, x1, y1, col, th = 1) {
+  g.fillStyle = col; x0 = Math.round(x0); y0 = Math.round(y0); x1 = Math.round(x1); y1 = Math.round(y1);
+  const dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0), sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1, o = Math.floor(th / 2);
+  let e = dx + dy;
+  for (;;) {
+    g.fillRect(x0 - o, y0 - o, th, th);
+    if (x0 === x1 && y0 === y1) break;
+    const e2 = 2 * e; if (e2 >= dy) { e += dy; x0 += sx; } if (e2 <= dx) { e += dx; y0 += sy; }
+  }
+}
+
+// ============================================================ PIXEL FONT ==
+// Original 5x7 proportional bitmap font. Rows 0-6 sit on the baseline; rows 7-8 are descenders.
+const FONT = {
+  A: ".###./#...#/#...#/#####/#...#/#...#/#...#", B: "####./#...#/#...#/####./#...#/#...#/####.",
+  C: ".###./#...#/#..../#..../#..../#...#/.###.", D: "####./#...#/#...#/#...#/#...#/#...#/####.",
+  E: "#####/#..../#..../####./#..../#..../#####", F: "#####/#..../#..../####./#..../#..../#....",
+  G: ".###./#...#/#..../#.###/#...#/#...#/.####", H: "#...#/#...#/#...#/#####/#...#/#...#/#...#",
+  I: "###/.#./.#./.#./.#./.#./###", J: "..###/...#./...#./...#./#..#./#..#./.##..",
+  K: "#...#/#..#./#.#../##.../#.#../#..#./#...#", L: "#..../#..../#..../#..../#..../#..../#####",
+  M: "#...#/##.##/#.#.#/#.#.#/#...#/#...#/#...#", N: "#...#/##..#/#.#.#/#..##/#...#/#...#/#...#",
+  O: ".###./#...#/#...#/#...#/#...#/#...#/.###.", P: "####./#...#/#...#/####./#..../#..../#....",
+  Q: ".###./#...#/#...#/#...#/#.#.#/#..#./.##.#", R: "####./#...#/#...#/####./#.#../#..#./#...#",
+  S: ".####/#..../#..../.###./....#/....#/####.", T: "#####/..#../..#../..#../..#../..#../..#..",
+  U: "#...#/#...#/#...#/#...#/#...#/#...#/.###.", V: "#...#/#...#/#...#/#...#/#...#/.#.#./..#..",
+  W: "#...#/#...#/#...#/#.#.#/#.#.#/#.#.#/.#.#.", X: "#...#/#...#/.#.#./..#../.#.#./#...#/#...#",
+  Y: "#...#/#...#/.#.#./..#../..#../..#../..#..", Z: "#####/....#/...#./..#../.#.../#..../#####",
+  a: "...../...../.###./....#/.####/#...#/.####", b: "#..../#..../####./#...#/#...#/#...#/####.",
+  c: "...../...../.###./#..../#..../#..../.###.", d: "....#/....#/.####/#...#/#...#/#...#/.####",
+  e: "...../...../.###./#...#/#####/#..../.###.", f: "..##/.#../####/.#../.#../.#../.#..",
+  g: "...../...../.####/#...#/#...#/#...#/.####/....#/.###.", h: "#..../#..../####./#...#/#...#/#...#/#...#",
+  i: "#/./#/#/#/#/#", j: "..#/.../..#/..#/..#/..#/..#/#.#/.#.",
+  k: "#.../#.../#..#/#.#./##../#.#./#..#", l: "#/#/#/#/#/#/#",
+  m: "...../...../##.#./#.#.#/#.#.#/#.#.#/#.#.#", n: "...../...../####./#...#/#...#/#...#/#...#",
+  o: "...../...../.###./#...#/#...#/#...#/.###.", p: "...../...../####./#...#/#...#/#...#/####./#..../#....",
+  q: "...../...../.####/#...#/#...#/#...#/.####/....#/....#", r: "..../..../#.##/##../#.../#.../#...",
+  s: "...../...../.####/#..../.###./....#/####.", t: ".#../.#../####/.#../.#../.#../..##",
+  u: "...../...../#...#/#...#/#...#/#...#/.####", v: "...../...../#...#/#...#/#...#/.#.#./..#..",
+  w: "...../...../#...#/#...#/#.#.#/#.#.#/.#.#.", x: "...../...../#...#/.#.#./..#../.#.#./#...#",
+  y: "...../...../#...#/#...#/#...#/#...#/.####/....#/.###.", z: "...../...../#####/...#./..#../.#.../#####",
+  0: ".###./#...#/#..##/#.#.#/##..#/#...#/.###.", 1: "..#../.##../..#../..#../..#../..#../.###.",
+  2: ".###./#...#/....#/...#./..#../.#.../#####", 3: "####./....#/....#/.###./....#/....#/####.",
+  4: "...#./..##./.#.#./#..#./#####/...#./...#.", 5: "#####/#..../####./....#/....#/#...#/.###.",
+  6: ".###./#..../#..../####./#...#/#...#/.###.", 7: "#####/....#/...#./..#../.#.../.#.../.#...",
+  8: ".###./#...#/#...#/.###./#...#/#...#/.###.", 9: ".###./#...#/#...#/.####/....#/....#/.###.",
+  " ": "../../../../../../..", "!": "#/#/#/#/#/./#", "?": ".###./#...#/....#/...#./..#../...../..#..",
+  ".": "./././././././#", ",": "./././././#/#", "'": "#/#", '"': "#.#/#.#", ":": "./././#/././#",
+  "-": "..../..../..../####", "+": ".../.../.#./###/.#.", "=": "..../..../####/..../####",
+  "$": "..#../.####/#.#../.###./..#.#/####./..#..", "%": "##..#/##..#/...#./..#../.#.../#..##/#..##",
+  "/": "....#/...#./...#./..#../.#.../.#.../#....", "(": ".#/#./#./#./#./#./.#", ")": "#./.#/.#/.#/.#/.#/#.",
+  "&": ".##../#..#./#.#../.#.../#.#.#/#..#./.##.#", "*": "...../#.#.#/.###./#####/.###./#.#.#",
+  "•": "./../.###./#####/#####/#####/.###.", "▶": "#.../##../###./####/###./##../#...",
+};
+const GLYPHS = {};
+for (const ch in FONT) {
+  const rows = FONT[ch].split("/");
+  GLYPHS[ch] = { w: Math.max(...rows.map(r => r.length)), rows };
+}
+const normChar = ch => ({ "“": '"', "”": '"', "’": "'", "‘": "'", "…": "...", "×": "x" }[ch] ?? ch);
+function textWidth(s, scale = 1) {
+  let w = 0;
+  for (const raw of s) for (const ch of normChar(raw)) w += ((GLYPHS[ch] || GLYPHS["?"]).w + 1) * scale;
+  return Math.max(0, w - scale);
+}
+const textCache = new Map();
+// Renders text into a cached canvas. outline: color of a 1-pixel ring (scaled), or null.
+function textSprite(s, col, scale = 1, outline = null) {
+  const key = s + "|" + col + "|" + scale + "|" + outline;
+  let cvs = textCache.get(key);
+  if (cvs) return cvs;
+  const o = outline ? scale : 0, w = textWidth(s, scale) + o * 2, h = 9 * scale + o * 2;
+  cvs = document.createElement("canvas"); cvs.width = Math.max(1, w); cvs.height = h;
+  const x = cvs.getContext("2d");
+  const paint = (col2, dx, dy) => {
+    x.fillStyle = col2; let cx = o + dx;
+    for (const raw of s) for (const ch of normChar(raw)) {
+      const gl = GLYPHS[ch] || GLYPHS["?"];
+      gl.rows.forEach((row, ry) => { for (let i = 0; i < row.length; i++) if (row[i] === "#") x.fillRect(cx + i * scale, o + dy + ry * scale, scale, scale); });
+      cx += (gl.w + 1) * scale;
+    }
+  };
+  if (outline) for (const [dx, dy] of [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]) paint(outline, dx * scale, dy * scale);
+  paint(col, 0, 0);
+  if (textCache.size > 500) textCache.clear();
+  textCache.set(key, cvs);
+  return cvs;
+}
+// Draws text at pixel coords. align: "left" | "center" | "right". y is the top of the cap height.
+function txt(s, x, y, col = WHITE, o = {}) {
+  const sc = o.scale || 1, spr = textSprite(s, col, sc, o.outline || null), off = o.outline ? sc : 0;
+  let dx = Math.round(x) - off;
+  if (o.align === "center") dx = Math.round(x - (spr.width - off * 2) / 2) - off;
+  else if (o.align === "right") dx = Math.round(x - (spr.width - off * 2)) - off;
+  g.drawImage(spr, dx, Math.round(y) - off);
+}
+function wrapPx(s, maxW) {
   const out = []; let cur = "";
-  for (const w of s.split(" ")) { const t = cur ? cur + " " + w : w; if (c.measureText(t).width > maxW && cur) { out.push(cur); cur = w; } else cur = t; }
+  for (const w of s.split(" ")) { const t = cur ? cur + " " + w : w; if (textWidth(t) > maxW && cur) { out.push(cur); cur = w; } else cur = t; }
   if (cur) out.push(cur);
   return out;
 }
 
-// ---------------------------------------------------------------- the yard --
-let ripples = [];
-const yard = { t: 0, wind: { x: 0, y: 0 }, kidX: -1, binGlow: 0, canopyAlpha: 1, bubble: "", bubbleTime: 0 };
-
-function drawGround() {
-  rect(0, 0, W, H, "#7cc45a");
-  for (let x = 0; x < W; x += 64) rect(x, 0, 32, H, "rgba(255,255,255,0.06)");
-  rect(0, 0, W, FENCE_H, "#b07b4a");
-  for (let x = 0; x < W; x += 28) line(x, 0, x, FENCE_H, "#8c5a2b", 2, "butt");
-  rect(0, FENCE_H - 6, W, 8, "#8c5a2b");
-  if (yard.kidX >= 0) {
-    const k = yard.kidX, y = FENCE_H - 8;
-    circle(k, y, 18, OUT); circle(k, y, 15, "#f1c27d");
-    ring(k, y - 4, 15, "#e63946", 8, Math.PI, TAU);
-    circle(k - 5, y + 2, 2.5, OUT); circle(k + 5, y + 2, 2.5, OUT);
-    ring(k, y + 6, 5, OUT, 2, 0.2, Math.PI - 0.2);
-  }
-  // deck
-  rect(DECK.x - 4, DECK.y - 4, DECK.w + 8, DECK.h + 8, OUT);
-  rect(DECK.x, DECK.y, DECK.w, DECK.h, "#e9d8b4");
-  for (let x = DECK.x; x < DECK.x + DECK.w; x += 46) line(x, DECK.y, x, DECK.y + DECK.h, "#d6c196", 2, "butt");
-  for (let y = DECK.y; y < DECK.y + DECK.h; y += 46) line(DECK.x, y, DECK.x + DECK.w, y, "#d6c196", 2, "butt");
-  // coping + water
-  const P = POOL;
-  rect(P.x - 14, P.y - 14, P.w + 28, P.h + 28, "#f7f3ea");
-  c.strokeStyle = OUT; c.lineWidth = 3; c.strokeRect(P.x - 14, P.y - 14, P.w + 28, P.h + 28);
-  rect(P.x - 2, P.y - 2, P.w + 4, P.h + 4, OUT);
-  rect(P.x, P.y, P.w, P.h, "#2fb6d9");
-  rect(P.x, P.y, P.w, 26, "#28a3c4");
-  for (let x = P.x + 40; x < P.x + P.w; x += 40) line(x, P.y, x, P.y + P.h, "rgba(255,255,255,0.07)", 1, "butt");
-  for (let y = P.y + 40; y < P.y + P.h; y += 40) line(P.x, y, P.x + P.w, y, "rgba(255,255,255,0.07)", 1, "butt");
-  c.strokeStyle = "rgba(191,242,255,0.35)"; c.lineWidth = 2.5; c.lineJoin = "round";
-  for (let row = 0; row < 18; row++) {
-    const y0 = P.y + 25 + row * 42; c.beginPath();
-    for (let i = 0; i <= 14; i++) { const x = P.x + i * P.w / 14, y = y0 + Math.sin(x * 0.03 + yard.t * 1.6 + row) * 6; i ? c.lineTo(x, y) : c.moveTo(x, y); }
-    c.stroke();
-  }
-  text("DEEP END  9 FT", P.x + P.w - 14, P.y + P.h - 16, 20, "rgba(255,255,255,0.5)", { align: "right", outline: 0, font: BODY });
-  for (const r of ripples) { const k = r.age / 1.2; ring(r.x, r.y, 10 + k * 50, `rgba(255,255,255,${0.7 * (1 - k)})`, 3); }
-  // ladder
-  const lx = P.x + P.w - 90;
-  for (const s of [-1, 1]) { line(lx + s * 16, P.y + P.h + 12, lx + s * 16, P.y + P.h - 36, OUT, 7); line(lx + s * 16, P.y + P.h + 12, lx + s * 16, P.y + P.h - 36, "#d0d4dc", 4); }
-  for (const y of [P.y + P.h - 12, P.y + P.h - 28]) line(lx - 16, y, lx + 16, y, "#d0d4dc", 4);
-  // trash can
-  const b = BIN;
-  if (yard.binGlow > 0) circle(b.x, b.y, 44 + 6 * Math.sin(yard.t * 8), "rgba(255,209,64,0.4)");
-  circle(b.x, b.y, 27, OUT); circle(b.x, b.y, 23, "#6b7686"); circle(b.x, b.y, 15, "#55606f");
-  line(b.x - 9, b.y, b.x + 9, b.y, OUT, 5);
-  text("TRASH", b.x, b.y + 50, 20, "#fff", { align: "center", outline: 6, font: BODY });
-  // tree trunk
-  circle(TREE.x, TREE.y, 22, OUT); circle(TREE.x, TREE.y, 18, "#7a4a26");
+// EarthBound-style window: dark fill, white rounded border, ink rim.
+function win(x, y, w, h) {
+  x = Math.round(x); y = Math.round(y);
+  R(x + 2, y, w - 4, h, INK); R(x, y + 2, w, h - 4, INK); R(x + 1, y + 1, w - 2, h - 2, INK);
+  R(x + 3, y + 1, w - 6, 1, WHITE); R(x + 3, y + h - 2, w - 6, 1, WHITE);
+  R(x + 1, y + 3, 1, h - 6, WHITE); R(x + w - 2, y + 3, 1, h - 6, WHITE);
+  R(x + 2, y + 2, 1, 1, WHITE); R(x + w - 3, y + 2, 1, 1, WHITE); R(x + 2, y + h - 3, 1, 1, WHITE); R(x + w - 3, y + h - 3, 1, 1, WHITE);
+  R(x + 3, y + 3, w - 6, h - 6, "#080818");
 }
 
-function drawTop() {
-  const t = yard.t, w = yard.wind, a = yard.canopyAlpha;
-  const sx = w.x * 0.03 + Math.sin(t * 1.3) * 2, sy = w.y * 0.03 + Math.cos(t * 1.1) * 2;
-  const blobs = [[0, 0], [-50, 30], [55, 20], [10, 60], [-20, -45], [60, -30]];
-  c.save(); c.globalAlpha = a;
-  for (const [x, y] of blobs) circle(TREE.x + x + sx, TREE.y + y + sy, 58, OUT);
-  for (const [x, y] of blobs) circle(TREE.x + x + sx, TREE.y + y + sy, 54, "#3f8f3a");
-  for (const [x, y] of blobs) circle(TREE.x + x + sx - 12, TREE.y + y + sy - 14, 26, "#56a84a");
-  c.restore();
-  const wl = Math.hypot(w.x, w.y);
-  if (wl > 20) {
-    const dx = w.x / wl, dy = w.y / wl;
-    for (let i = 0; i < 12; i++) {
-      let x = ((i * 197 + t * wl * 3) % 900) - 90; const y = 180 + i * 85;
-      if (dx < 0) x = W - x;
-      line(x, y, x + dx * 70, y + dy * 70, "rgba(255,255,255,0.45)", 3);
-    }
+// ================================================================ SPRITES ==
+// Hand-made pixel art. Letters map to palette colors; "." is transparent.
+const CMAP = {
+  k: INK, w: WHITE, s: "#f8c890", S: "#d89068", h: "#f8d840", H: "#c89820", o: "#f89040", O: "#c86020",
+  t: "#38b0a8", T: "#207a78", p: "#f878b8", y: "#f8e040", Y: "#d0a818", r: "#e84838", b: "#4878e8",
+  l: "#b8e8f8", n: "#c08040", N: "#683818", c: "#f0c090", C: "#c89060", G: "#a8b0c0", D: "#687080",
+  e: "#68c848", E: "#389030", z: "#f8d868", g: "#68a838", m: "#f880b8", M: "#c85088", f: "#f09070",
+  F: "#c86048", v: "#9858e0", V: "#6838b0", q: "#e0e8f8",
+};
+function sprite(rows, map = {}) {
+  const w = Math.max(...rows.map(r => r.length)), h = rows.length;
+  const cvs = document.createElement("canvas"); cvs.width = w; cvs.height = h;
+  const x = cvs.getContext("2d");
+  rows.forEach((r, yy) => { for (let i = 0; i < r.length; i++) { const ch = r[i]; if (ch === ".") continue; x.fillStyle = map[ch] || CMAP[ch] || "#f0f"; x.fillRect(i, yy, 1, 1); } });
+  return cvs;
+}
+function flip(src) {
+  const cvs = document.createElement("canvas"); cvs.width = src.width; cvs.height = src.height;
+  const x = cvs.getContext("2d"); x.translate(src.width, 0); x.scale(-1, 1); x.drawImage(src, 0, 0); return cvs;
+}
+
+// Pool Boy: 14x20, four facings, two walk frames.
+const HEAD_FRONT = [
+  "....kkkkkk....", "..kkhhhhhhkk..", ".khhhhhhhhhhk.", ".khhhhhhhhhHk.", ".khshhhhshhHk.",
+  ".kssssssssssk.", ".kskkkssskkksk", ".ksssssssssSk.", "..ksssSSsssk..", "...kssssssk...",
+];
+const HEAD_BACK = [
+  "....kkkkkk....", "..kkhhhhhhkk..", ".khhhhhhhhhhk.", ".khhhhhhhhhHk.", ".khhhhhhhhhHk.",
+  ".khhhhhhhhhHk.", ".khhhhhhhhHHk.", ".kHhhhhhhhHHk.", "..kHHhhhhHHk..", "...kssssssk...",
+];
+const TORSO = ["..kkoooooookk.", ".ksoooooooosk.", ".ksoOooooOosk.", ".kskooooooksk.", "..kkttttttkk..", "...kttTTttk..."];
+const LEGS_A = ["...ksk..ksk...", "...ksk..ksk...", "..kppk..kppk..", "..kkkk..kkkk.."];
+const LEGS_B = ["...ksk..ksk...", "..kppk..ksk...", "..kkkk..kppk..", "........kkkk.."];
+const HEAD_SIDE = [
+  "....kkkkk.....", "..kkhhhhhkk...", ".khhhhhhhhhk..", ".khhhhhhhhhhk.", ".kHhhhhhhsshk.",
+  ".kHhhhsssssk..", ".kHhhsssskkk..", ".kHhssssssssk.", "..kHsssssSk...", "...ksssssk....",
+];
+const TORSO_SIDE = ["...kkoooookk..", "..kooooooosk..", "..koOooooosk..", "...kooooook...", "...kttttttk...", "...kttTtttk..."];
+const LEGS_SIDE_A = ["....kssk......", "....kssk......", "....kpppk.....", "....kkkkk....."];
+const LEGS_SIDE_B = ["...ksk.ksk....", "..ksk...ksk...", "..kpk...kppk..", "..kk.....kkk.."];
+const BOY = {
+  down: [sprite([...HEAD_FRONT, ...TORSO, ...LEGS_A]), sprite([...HEAD_FRONT, ...TORSO, ...LEGS_B])],
+  up: [sprite([...HEAD_BACK, ...TORSO, ...LEGS_A]), sprite([...HEAD_BACK, ...TORSO, ...LEGS_B])],
+  right: [sprite([...HEAD_SIDE, ...TORSO_SIDE, ...LEGS_SIDE_A]), sprite([...HEAD_SIDE, ...TORSO_SIDE, ...LEGS_SIDE_B])],
+};
+BOY.left = BOY.right.map(flip);
+
+const LEAF_ROWS = ["...kkk...", ".kkgggkk.", "kgggGgggk", "nkkgggkk.", "...kkk..."];
+const SPR = {
+  leaf: [["#68c048", "#409028"], ["#f89838", "#c86818"], ["#f8d048", "#c8a020"], ["#b87040", "#885028"]]
+    .map(([a, b]) => sprite(LEAF_ROWS, { g: a, G: b })),
+  sock: sprite([".kkkk..", ".kwwk..", ".krrk..", ".kwwk..", ".kbbk..", ".kwwkk.", ".kwwwwk", ".kwwwwk", "..kkkk."]),
+  duck: sprite(["....kkkk..", "...kyyyyk.", "...kykyyok", "...kyyyyk.", ".kkkyyyk..", "kyyyyyyyk.", "kyyyyyYyk.", ".kyyyyyk..", "..kkkkk..."]),
+  pizza: sprite(["kkkkkkkkkk", "knnnnnnnnk", "kzzrzzzrzk", ".kzzzzrzk.", ".kzrzzzzk.", "..kzzzzk..", "..kzzrzk..", "...kzzk...", "...kzzk...", "....kk...."]),
+  toupee: sprite(["..kkkkkkk..", ".kNnNnNnNk.", "kNnNnNnNnNk", "kNNNNNNNNNk", ".kkkkkkkkk."]),
+  phone: sprite(["kkkkkk", "kbbbbk", "klllbk", "kbllbk", "kbblbk", "kbbbbk", "kkkkkk", "kGGGGk", "kkkkkk"]),
+  bandaid: sprite([".kkkkkkkk.", "kcccCCccck", "kccCgCCcck", "kcccCCccck", ".kkkkkkkk."]),
+  frog: sprite([".kkk...kkk.", "kwwkkkkkwwk", "kwkeeeeekwk", ".keeeeeeek.", "keeeEEEeeek", "keEeeeeeEek", ".keeeeeeek.", "kEk.kkk.kEk", "kkk.....kkk"]),
+  bin: sprite([".kkkkkkkkkkkk.", "kqqqqqqqqqqqqk", "kGGGGkkkkGGGGk", ".kkkkkkkkkkkk.", ".kGDGGDGGDGGk.", ".kGDGGDGGDGGk.", ".kGDGGDGGDGGk.", ".kGDGGDGGDGGk.", ".kGDGGDGGDGGk.", ".kGDGGDGGDGGk.", "..kkkkkkkkkk.."]),
+  kid: sprite(["..kkkkkk..", ".krrrrrrk.", "kkrrrrrrkk", "kssssssssk", "kskssssksk", "kssssssssk", ".kssrrssk.", "..kkkkkk.."]),
+};
+SPR.ball = (() => {
+  const cvs = document.createElement("canvas"); cvs.width = cvs.height = 15; const x = cvs.getContext("2d");
+  const cols = [C.red, WHITE, C.blue, WHITE, C.yellow, WHITE];
+  for (let yy = 0; yy < 15; yy++) for (let xx = 0; xx < 15; xx++) {
+    const dx = xx - 7, dy = yy - 7, d = Math.hypot(dx, dy);
+    if (d > 7.4) continue;
+    x.fillStyle = d > 6.4 ? INK : d < 1.6 ? WHITE : cols[Math.floor(((Math.atan2(dy, dx) + Math.PI) / TAU) * 6) % 6];
+    x.fillRect(xx, yy, 1, 1);
   }
-  // Mrs. Henderson
-  const h = HOME;
-  rect(h.x - 26, h.y - 50, 52, 110, OUT); rect(h.x - 22, h.y - 46, 44, 102, "#f7f3ea");
-  for (let y = -40; y < 56; y += 12) line(h.x - 22, h.y + y, h.x + 22, h.y + y, "#3fc1e0", 4, "butt");
-  circle(h.x, h.y - 28, 17, OUT); circle(h.x, h.y - 28, 14, "#f5d0b0");
-  circle(h.x, h.y - 34, 22, OUT); circle(h.x, h.y - 34, 19, "#ffd166"); circle(h.x, h.y - 34, 9, "#e63946");
-  rect(h.x - 16, h.y - 10, 32, 40, "#9b5de5");
-  circle(h.x - 34, h.y + 10, 8, OUT); circle(h.x - 34, h.y + 10, 6, "#fff3b0");
-  text("MRS. HENDERSON", h.x - 6, h.y + 90, 17, "#fff", { align: "center", outline: 5, font: BODY });
-  if (yard.bubbleTime > 0 && yard.bubble) {
-    const lines = wrap(yard.bubble, 400, 24, BODY), lh = 30;
-    c.font = `24px ${BODY}`;
-    const bw = Math.max(...lines.map(l => c.measureText(l).width)) + 28, bh = lines.length * lh + 18;
-    const bx = Math.min(700 - bw, h.x - bw + 30), by = h.y - 82 - bh;
-    rrect(bx - 3, by - 3, bw + 6, bh + 6, 14, OUT); rrect(bx, by, bw, bh, 12, "#fff");
-    poly([bx + bw - 54, by + bh - 2, bx + bw - 26, by + bh - 2, h.x - 6, h.y - 58], "#fff");
-    lines.forEach((l, i) => text(l, bx + 14, by + 34 + i * lh, 24, OUT, { outline: 0, font: BODY }));
+  x.fillStyle = "rgba(255,255,255,0.8)"; x.fillRect(4, 3, 2, 1); x.fillRect(3, 4, 1, 2);
+  return cvs;
+})();
+
+// ============================================================== THE YARD ==
+let ripples = [];
+const yard = { t: 0, wind: { x: 0, y: 0 }, kidX: -1, binGlow: 0, canopyAlpha: 1, bubble: "", bubbleTime: 0, typed: 0 };
+const POOLP = { x: px(POOL.x), y: px(POOL.y), w: px(POOL.w), h: px(POOL.h) };
+const DECKP = { x: px(DECK.x), y: px(DECK.y), w: px(DECK.w), h: px(DECK.h) };
+const FENCEP = px(FENCE_H);
+
+// Static ground layer, rendered once.
+const ground = (() => {
+  const cvs = document.createElement("canvas"); cvs.width = RW; cvs.height = RH;
+  const x = cvs.getContext("2d");
+  const Rx = (a, b, w, h, col) => { x.fillStyle = col; x.fillRect(a, b, w, h); };
+  Rx(0, 0, RW, RH, C.grass);
+  for (let i = 0; i < 420; i++) {   // grass tufts
+    const gx = (i * 97 + (i * i) % 13) % RW, gy = (i * 61 + (i * 7) % 17) % RH;
+    Rx(gx, gy, 1, 2, C.grassD); Rx(gx + 2, gy, 1, 2, C.grassD); Rx(gx + 1, gy + 1, 1, 1, C.grassD);
+    if (i % 23 === 0) { Rx(gx + 6, gy + 3, 1, 1, i % 2 ? "#f8f8f8" : "#f86890"); Rx(gx + 5, gy + 4, 3, 1, i % 2 ? "#f8f8f8" : "#f86890"); Rx(gx + 6, gy + 5, 1, 1, "#f8e050"); }
+  }
+  // deck tiles
+  const d = DECKP;
+  Rx(d.x - 1, d.y - 1, d.w + 2, d.h + 2, INK);
+  Rx(d.x, d.y, d.w, d.h, C.deck);
+  for (let ty = d.y; ty < d.y + d.h; ty += 12) for (let tx = d.x; tx < d.x + d.w; tx += 12) {
+    if (((tx - d.x) / 12 + (ty - d.y) / 12) % 2) Rx(tx, ty, 12, 12, C.deckD);
+    Rx(tx, ty, 12, 1, C.grout); Rx(tx, ty, 1, 12, C.grout);
+  }
+  Rx(d.x, d.y + d.h, d.w, 2, "rgba(0,0,0,0.25)");
+  // coping
+  const p = POOLP;
+  Rx(p.x - 6, p.y - 6, p.w + 12, p.h + 12, INK);
+  Rx(p.x - 5, p.y - 5, p.w + 10, p.h + 10, C.coping);
+  for (let i = p.x - 5; i < p.x + p.w + 5; i += 8) { Rx(i, p.y - 5, 1, 5, C.copingD); Rx(i, p.y + p.h, 1, 5, C.copingD); }
+  for (let i = p.y - 5; i < p.y + p.h + 5; i += 8) { Rx(p.x - 5, i, 5, 1, C.copingD); Rx(p.x + p.w, i, 5, 1, C.copingD); }
+  Rx(p.x - 5, p.y + p.h + 4, p.w + 10, 1, C.copingD);
+  Rx(p.x - 1, p.y - 1, p.w + 2, p.h + 2, INK);
+  // tree trunk
+  const tx = px(TREE.x), ty = px(TREE.y);
+  Rx(tx - 4, ty - 2, 8, 14, INK); Rx(tx - 3, ty - 2, 6, 13, C.trunk); Rx(tx - 3, ty - 2, 2, 13, "#a06838");
+  Rx(tx - 6, ty + 11, 12, 2, "rgba(0,0,0,0.25)");
+  return cvs;
+})();
+
+// Fence (drawn after the neighbor kid so he peeks over it).
+const fenceLayer = (() => {
+  const cvs = document.createElement("canvas"); cvs.width = RW; cvs.height = FENCEP + 4; const x = cvs.getContext("2d");
+  const Rx = (a, b, w, h, col) => { x.fillStyle = col; x.fillRect(a, b, w, h); };
+  for (let fx = 0; fx < RW; fx += 8) {
+    Rx(fx, 16, 8, FENCEP - 16, INK);
+    Rx(fx + 1, 17, 6, FENCEP - 18, C.fence);
+    Rx(fx + 1, 17, 1, FENCEP - 18, "#f0c080");
+    Rx(fx + 6, 17, 1, FENCEP - 18, C.fenceD);
+    Rx(fx + 2, 14, 4, 3, INK); Rx(fx + 3, 13, 2, 1, INK); Rx(fx + 2, 15, 4, 2, C.fence);
+  }
+  for (const ry of [24, FENCEP - 9]) { Rx(0, ry, RW, 4, INK); Rx(0, ry + 1, RW, 2, C.fenceD); }
+  Rx(0, FENCEP, RW, 3, "rgba(0,0,0,0.25)");
+  return cvs;
+})();
+
+// Tree canopy, plus a dithered see-through version for when Pool Boy walks under it.
+const canopy = (() => {
+  const cvs = document.createElement("canvas"); cvs.width = 80; cvs.height = 70; const x = cvs.getContext("2d");
+  const blobs = [[40, 36, 18], [24, 42, 15], [57, 40, 15], [44, 52, 14], [33, 22, 14], [52, 24, 13]];
+  const discX = (cx, cy, r, col) => { x.fillStyle = col; for (let dy = -r; dy <= r; dy++) { const w = Math.floor(Math.sqrt(r * r - dy * dy + r * 0.6)); x.fillRect(cx - w, cy + dy, 2 * w + 1, 1); } };
+  for (const [a, b, r] of blobs) discX(a, b, r + 1, INK);
+  for (const [a, b, r] of blobs) discX(a, b, r, C.canopyD);
+  for (const [a, b, r] of blobs) discX(a - 2, b - 3, r - 3, C.canopy);
+  for (const [a, b, r] of blobs) discX(a - 5, b - 6, Math.max(r - 10, 2), C.canopyL);
+  for (let i = 0; i < 40; i++) { x.fillStyle = C.canopyD; x.fillRect(10 + (i * 37) % 60, 15 + (i * 23) % 45, 1, 1); }
+  return cvs;
+})();
+const canopyDither = (() => {
+  const cvs = document.createElement("canvas"); cvs.width = canopy.width; cvs.height = canopy.height; const x = cvs.getContext("2d");
+  x.drawImage(canopy, 0, 0);
+  const img = x.getImageData(0, 0, cvs.width, cvs.height);
+  for (let yy = 0; yy < cvs.height; yy++) for (let xx = 0; xx < cvs.width; xx++) if ((xx + yy) % 2 === 0) img.data[(yy * cvs.width + xx) * 4 + 3] = 0;
+  x.putImageData(img, 0, 0);
+  return cvs;
+})();
+
+function drawWater() {
+  const p = POOLP, t = yard.t;
+  R(p.x, p.y, p.w, p.h, C.water);
+  for (let yy = p.y + 20; yy < p.y + p.h; yy += 26) R(p.x, yy, p.w, 13, "#50b4ec");   // soft bands
+  R(p.x, p.y + p.h - 70, p.w, 70, C.waterD);                                         // deep end
+  R(p.x, p.y, p.w, 7, C.wall); R(p.x, p.y + 7, p.w, 1, C.wallD);                   // far wall (we see its face)
+  for (let xx = p.x + 10; xx < p.x + p.w; xx += 14) R(xx, p.y + 1, 1, 6, C.wallD);
+  R(p.x, p.y, 2, p.h, C.wall); R(p.x + p.w - 2, p.y, 2, p.h, C.wallD);
+  // EarthBound-ish water: little white wave squiggles that drift and twinkle.
+  for (let i = 0; i < 46; i++) {
+    const sx = p.x + 4 + ((i * 53 + t * (6 + (i % 3) * 3)) % (p.w - 10));
+    const sy = p.y + 12 + ((i * 89) % (p.h - 20)) + Math.round(Math.sin(t * 1.5 + i) * 1.5);
+    if ((Math.floor(t * 2 + i * 0.7)) % 4 === 0) continue;
+    R(sx, sy, 2, 1, C.sparkle); R(sx + 2, sy - 1, 2, 1, C.sparkle); R(sx + 4, sy, 1, 1, C.sparkle);
+  }
+  txt("DEEP END 9FT", p.x + 5, p.y + p.h - 12, "#a8e0ff");
+  for (const r of ripples) ringPx(px(r.x), px(r.y), 3 + (r.age / 1.2) * 16, r.age < 0.6 ? WHITE : C.sparkle);
+  // ladder over the near wall
+  const lx = px(POOL.x + POOL.w - 90), ly = p.y + p.h;
+  for (const s of [-5, 5]) { R(lx + s - 1, ly - 14, 3, 18, INK); R(lx + s, ly - 13, 1, 16, "#d8e0e8"); }
+  for (const yy of [ly - 10, ly - 4]) { R(lx - 5, yy - 1, 11, 3, INK); R(lx - 5, yy, 11, 1, "#d8e0e8"); }
+}
+
+function drawMrsHenderson() {
+  const cx = px(HOME.x), cy = px(HOME.y);
+  // lounge chair (3/4 view), striped
+  R(cx - 8, cy - 14, 16, 32, INK);
+  for (let i = 0; i < 30; i++) R(cx - 7, cy - 13 + i, 14, 1, Math.floor(i / 3) % 2 ? "#38b8e0" : WHITE);
+  R(cx - 7, cy + 18, 2, 3, INK); R(cx + 5, cy + 18, 2, 3, INK);
+  // her: legs, swimsuit, arms, head, huge sun hat
+  R(cx - 4, cy + 4, 3, 12, INK); R(cx + 1, cy + 4, 3, 12, INK); R(cx - 3, cy + 4, 1, 11, "#f8d0b0"); R(cx + 2, cy + 4, 1, 11, "#f8d0b0");
+  R(cx - 5, cy - 5, 10, 11, INK); R(cx - 4, cy - 4, 8, 9, "#9858e0"); R(cx - 4, cy - 4, 8, 2, "#b078f0");
+  R(cx - 7, cy - 4, 3, 7, INK); R(cx + 4, cy - 4, 3, 7, INK); R(cx - 6, cy - 3, 1, 5, "#f8d0b0"); R(cx + 5, cy - 3, 1, 5, "#f8d0b0");
+  disc(cx, cy - 9, 4, INK); disc(cx, cy - 9, 3, "#f8d0b0"); R(cx - 3, cy - 9, 6, 1, INK);
+  oval(cx, cy - 13, 9, 3, INK); oval(cx, cy - 13, 8, 2, C.yellow); R(cx - 4, cy - 14, 8, 2, C.red); R(cx - 3, cy - 17, 6, 3, INK); R(cx - 2, cy - 16, 4, 2, C.yellow);
+  // lemonade
+  R(cx + 9, cy + 2, 4, 6, INK); R(cx + 10, cy + 3, 2, 4, "#f8f0a0"); R(cx + 12, cy, 1, 3, C.red);
+}
+
+function drawDale(d) {
+  const shake = d.grumpy > 0 ? Math.round(Math.sin(d.t * 50) * 2) : 0;
+  const cx = px(d.x) + shake, cy = px(d.y) + Math.round(Math.sin(d.t * 2) * 1);
+  oval(cx + 1, cy + 3, 18, 14, "rgba(0,40,80,0.25)");
+  disc(cx, cy, 18, INK); disc(cx, cy, 17, "#f878b0"); disc(cx - 3, cy - 4, 12, "#f8a0c8");
+  disc(cx, cy, 8, INK); disc(cx, cy, 7, C.water);
+  // flamingo neck + head
+  linePx(cx - 10, cy - 12, cx - 13, cy - 24, INK, 4); linePx(cx - 10, cy - 12, cx - 13, cy - 24, "#f878b0", 2);
+  disc(cx - 12, cy - 26, 4, INK); disc(cx - 12, cy - 26, 3, "#f878b0"); R(cx - 19, cy - 26, 5, 2, INK); R(cx - 12, cy - 27, 1, 1, INK);
+  // Dale: belly, arms over the ring, head with shades
+  R(cx - 13, cy - 3, 26, 4, INK); R(cx - 12, cy - 2, 24, 2, "#f09070");
+  oval(cx, cy + 2, 7, 6, INK); oval(cx, cy + 2, 6, 5, "#f09070"); R(cx - 5, cy + 5, 10, 3, C.green);
+  disc(cx, cy - 7, 5, INK); disc(cx, cy - 7, 4, "#f09070"); R(cx - 3, cy - 8, 7, 2, INK); R(cx - 2, cy - 11, 4, 1, "#b06040");
+  if (d.grumpy > 0) txt("HEY!!", cx, cy - 34, C.red, { align: "center", outline: INK });
+  else for (let i = 0; i < 3; i++) {
+    const ph = (d.t * 0.6 + i / 3) % 1;
+    if (ph < 0.85) txt(i === 1 ? "Z" : "z", cx + 8 + ph * 10, cy - 16 - ph * 14, WHITE, { outline: INK });
+  }
+}
+
+function drawDebris(d) {
+  if (d.kind === "dale") return drawDale(d);
+  const spr = d.kind === "leaf" ? SPR.leaf[["#5aa83a", "#e8892c", "#d9b330", "#a3502b"].indexOf(d.tint) % 4 || 0] : SPR[d.kind];
+  if (!spr) return;
+  let cx = px(d.x), cy = px(d.y), lift = 0;
+  if (d.state === "fly") {
+    const k = Math.min(d.flyT / d.flyDur, 1); lift = Math.round(Math.sin(k * Math.PI) * 30);
+    oval(cx, cy + 2, Math.ceil(spr.width / 2), 2, "rgba(0,0,0,0.25)");
+  } else {
+    cy += Math.round(Math.sin(d.t * 3) * 0.8);
+    ringPx(cx, cy + 1, Math.ceil(Math.max(spr.width, spr.height) / 2) + 2, "rgba(216,248,255,0.55)");
+  }
+  g.drawImage(spr, cx - Math.floor(spr.width / 2), cy - Math.floor(spr.height / 2) - lift);
+}
+
+function facingOf(ang) {
+  const dx = Math.cos(ang), dy = Math.sin(ang);
+  return Math.abs(dy) >= Math.abs(dx) ? (dy > 0 ? "down" : "up") : (dx > 0 ? "right" : "left");
+}
+function drawBoy(b, scale = 1, forcedFacing = null) {
+  const face = forcedFacing || facingOf(b.ang), frames = BOY[face];
+  const spr = frames[b.moving ? Math.floor(b.walk / 3) % 2 : 0];
+  const fx = px(b.x), fy = px(b.y) + 4;
+  const sx = fx - Math.floor(spr.width * scale / 2), sy = fy - spr.height * scale;
+  const hand = { down: [0, -8], up: [0, -10], right: [5, -9], left: [-5, -9] }[face];
+  const hx = fx + hand[0] * scale, hy = fy + hand[1] * scale;
+  const nx = px(b.head.x), ny = px(b.head.y), full = b.contents.length >= CAPACITY;
+  const drawNet = () => {
+    linePx(hx, hy, nx, ny, INK, 3); linePx(hx, hy, nx, ny, "#d8e0e8", 1);
+    disc(nx, ny, 11, INK); disc(nx, ny, 10, "#88d0f0");
+    for (let yy = -9; yy <= 9; yy++) for (let xx = -9; xx <= 9; xx++)
+      if ((xx + yy) % 2 === 0 && xx * xx + yy * yy < 85) R(nx + xx, ny + yy, 1, 1, "rgba(255,255,255,0.55)");
+    b.contents.forEach((col, i) => { const a = i / CAPACITY * TAU + 0.5, cx2 = nx + Math.round(Math.cos(a) * 5), cy2 = ny + Math.round(Math.sin(a) * 5); R(cx2 - 2, cy2 - 2, 4, 4, INK); R(cx2 - 1, cy2 - 1, 2, 2, col); });
+    ringPx(nx, ny, 10, full && (yard.t % 0.4) < 0.2 ? C.red : C.yellow);
+    ringPx(nx, ny, 9, full && (yard.t % 0.4) < 0.2 ? C.red : C.yellow);
+  };
+  oval(fx, fy - 1, 6 * scale, 2 * scale, "rgba(0,0,0,0.3)");
+  if (face === "up") drawNet();
+  if (scale === 1) g.drawImage(spr, sx, sy); else g.drawImage(spr, sx, sy, spr.width * scale, spr.height * scale);
+  if (face !== "up") drawNet();
+  if (b.stun > 0) for (let i = 0; i < 3; i++) { const a = yard.t * 6 + i * TAU / 3; R(fx + Math.cos(a) * 9 - 1, sy - 2 + Math.sin(a) * 3, 2, 2, C.yellow); }
+  if (full && (yard.t % 0.6) < 0.4) txt("NET FULL!", fx, sy - 11, C.red, { align: "center", outline: INK });
+}
+
+// ---------------------------------------------------------------- popups --
+let popups = [];
+function popup(s, x, y, size, col, rise = 60, dur = 0.9) {
+  const scale = size >= 34 ? 2 : 1, half = textWidth(s, scale) / 2 + 4;
+  popups.push({ s, x: clamp(px(x), half, RW - half), y: px(y), scale, col, rise: px(rise), dur, age: 0 });
+}
+function drawPopups(dt) {
+  popups = popups.filter(p => (p.age += dt) < p.dur);
+  for (const p of popups) {
+    if (p.age > p.dur * 0.7 && Math.floor(p.age * 20) % 2) continue;   // retro blink-out
+    const e = 1 - Math.pow(1 - Math.min(p.age / (p.dur * 0.6), 1), 3);
+    txt(p.s, p.x, p.y - p.rise * e - 4, p.col, { align: "center", scale: p.scale, outline: INK });
   }
 }
 
@@ -334,121 +636,6 @@ function updateDebris(d, dt, wind, onLand) {
   if (d.y < y0 || d.y > y1) d.vy *= -0.6;
   d.x = clamp(d.x, x0, x1); d.y = clamp(d.y, y0, y1);
 }
-function drawDebris(d) {
-  let height = 0;
-  c.save(); c.translate(d.x, d.y);
-  if (d.state === "fly") {
-    const k = Math.min(d.flyT / d.flyDur, 1); height = Math.sin(k * Math.PI) * 120;
-    circle(0, height * 0.6, d.r * 0.9, "rgba(0,0,0,0.18)");
-    c.scale(1 + height / 200, 1 + height / 200);
-  } else {
-    ring(0, 0, d.r + 5 + Math.sin(d.t * 2) * 2, "rgba(255,255,255,0.25)", 2);
-    const s = 1 + Math.sin(d.t * 3) * 0.03; c.scale(s, s);
-  }
-  c.rotate(d.rot);
-  const R = d.r;
-  switch (d.kind) {
-    case "leaf": {
-      const p = [];
-      for (let i = 0; i < 12; i++) { const a = i / 12 * TAU, r = R * (1 - 0.45 * Math.abs(Math.sin(a))); p.push(Math.cos(a) * r * 1.2, Math.sin(a) * r * 0.75); }
-      poly(p, d.tint); c.strokeStyle = OUT; c.lineWidth = 2; c.stroke();
-      line(-R * 1.3, 0, R * 1.1, 0, "rgba(0,0,0,0.35)", 2); break;
-    }
-    case "sock":
-      line(-4, -12, -4, 6, OUT, 14); line(-4, 6, 8, 8, OUT, 14);
-      line(-4, -12, -4, 6, "#f2f2f2", 9); line(-4, 6, 8, 8, "#f2f2f2", 9);
-      line(-9, -10, 1, -10, "#e63946", 3, "butt"); line(-9, -6, 1, -6, "#3a86ff", 3, "butt"); break;
-    case "duck":
-      ellipse(0, 2, 14, 11, OUT); ellipse(0, 2, 11.5, 8.5, "#ffd23f");
-      circle(6, -6, 8.5, OUT); circle(6, -6, 6.5, "#ffd23f");
-      poly([11, -7, 18, -5, 11, -3], "#ff8c1a"); circle(7, -8, 1.6, OUT); break;
-    case "pizza":
-      poly([-15, -10, 15, -10, 0, 16], OUT); poly([-11, -8, 11, -8, 0, 11], "#ffd166");
-      line(-14, -10, 14, -10, "#c98b3b", 5); for (const [x, y] of [[-4, -3], [4, -2], [0, 4]]) circle(x, y, 2.8, "#c0392b"); break;
-    case "toupee":
-      ellipse(0, 0, 17, 11, OUT); ellipse(0, 0, 14, 8.5, "#5b3a1e");
-      for (let i = 0; i < 5; i++) line(-10 + i * 5, -6, -7 + i * 5, 6, "#3d2512", 2); break;
-    case "phone":
-      rect(-8, -13, 16, 26, OUT); rect(-6, -11, 12, 20, `hsl(215,90%,${62 + 10 * Math.sin(d.t * 5)}%)`); circle(0, 11, 1.5, "#888"); break;
-    case "ball": {
-      circle(0, 0, R + 3, OUT);
-      const cols = ["#e63946", "#fff", "#3a86ff", "#fff", "#ffd23f", "#fff"];
-      for (let i = 0; i < 6; i++) { c.beginPath(); c.moveTo(0, 0); c.arc(0, 0, R, i / 6 * TAU, (i + 1) / 6 * TAU); c.closePath(); c.fillStyle = cols[i]; c.fill(); }
-      circle(0, 0, 4, "#fff"); break;
-    }
-    case "bandaid":
-      rect(-12, -5, 24, 10, OUT); rect(-10, -3.5, 20, 7, "#e8b48a"); rect(-4, -3.5, 8, 7, "#c9956a"); circle(0, 0, 1.5, "#7a8b2a"); break;
-    case "frog":
-      for (const s of [-1, 1]) { ellipse(s * 9, 7, 6, 4, OUT); ellipse(s * 9, 7, 4.5, 3, "#4c9e2f"); }
-      ellipse(0, 0, 12, 11, OUT); ellipse(0, 0, 10, 9, "#6cc24a");
-      for (const s of [-1, 1]) { circle(s * 5, -8, 4.5, OUT); circle(s * 5, -8, 3.5, "#fff"); circle(s * 5, -9, 1.6, OUT); } break;
-    case "dale":
-      circle(0, 0, 50, OUT); circle(0, 0, 46, "#ff7eb6"); circle(0, 0, 26, OUT); circle(0, 0, 23, "#3fc1e0");
-      line(0, -44, 10, -66, OUT, 14); line(0, -44, 10, -66, "#ff7eb6", 9);
-      circle(12, -70, 10, OUT); circle(12, -70, 7.5, "#ff7eb6"); poly([18, -72, 28, -66, 18, -66], OUT);
-      circle(0, 4, 22, OUT); circle(0, 4, 19, "#f08a6b");
-      for (const s of [-1, 1]) { line(s * 14, -4, s * 40, -12, OUT, 11); line(s * 14, -4, s * 40, -12, "#f08a6b", 7); }
-      circle(0, -20, 13, OUT); circle(0, -20, 10.5, "#f08a6b"); line(-7, -22, 7, -22, OUT, 4);
-      rect(-18, 14, 36, 10, "#2a9d8f"); break;
-  }
-  c.restore();
-  if (d.kind === "dale") {
-    if (d.grumpy > 0) text("HEY!!", d.x, d.y - 46, 34, "#ff5a5a", { align: "center" });
-    else for (let i = 0; i < 3; i++) {
-      const ph = (d.t * 0.6 + i / 3) % 1;
-      text("z", d.x + 20 + ph * 30, d.y - 30 - ph * 40, 16 + ph * 14, `rgba(255,255,255,${1 - ph})`, { outline: 0, font: BODY });
-    }
-  }
-}
-
-// --------------------------------------------------------------- Pool Boy --
-const SKIN = "#e8b48a";
-function drawBoy(b) {
-  const hx = b.head.x - b.x, hy = b.head.y - b.y, dx = Math.cos(b.ang), dy = Math.sin(b.ang);
-  const full = b.contents.length >= CAPACITY;
-  c.save(); c.translate(b.x, b.y);
-  line(dx * 16, dy * 16, hx, hy, OUT, 9); line(dx * 16, dy * 16, hx, hy, "#d0d4dc", 5);
-  circle(hx, hy, NET_R + 4, OUT); circle(hx, hy, NET_R, "rgba(255,255,255,0.22)");
-  for (let i = -2; i <= 2; i++) {
-    const o = i * 11, w = Math.sqrt(Math.max(NET_R * NET_R - o * o, 0));
-    line(hx + o, hy - w, hx + o, hy + w, "rgba(255,255,255,0.35)", 1.5, "butt");
-    line(hx - w, hy + o, hx + w, hy + o, "rgba(255,255,255,0.35)", 1.5, "butt");
-  }
-  b.contents.forEach((col, i) => { const a = i / CAPACITY * TAU + 0.5; circle(hx + Math.cos(a) * 13, hy + Math.sin(a) * 13, 7, OUT); circle(hx + Math.cos(a) * 13, hy + Math.sin(a) * 13, 5.5, col); });
-  ring(hx, hy, NET_R + 1, full && (yard.t % 0.4) < 0.2 ? "#ff5a5a" : "#ffd23f", 4);
-  circle(4, 6, 24, "rgba(0,0,0,0.2)");
-  c.rotate(b.ang + Math.PI / 2);
-  const step = b.moving ? Math.sin(b.walk) * 7 : 0;
-  for (const s of [-1, 1]) { ellipse(s * 9, 10 + step * s, 6, 9, OUT); ellipse(s * 9, 10 + step * s, 4.5, 7.5, "#ff7eb6"); }
-  ellipse(0, 4, 18, 10, OUT); ellipse(0, 4, 15.5, 8, "#2a9d8f");
-  ellipse(0, -2, 22, 13, OUT); ellipse(0, -2, 19, 10.5, SKIN);
-  ellipse(0, -1, 13, 9, "#ff9f1c");
-  for (const s of [-1, 1]) { line(s * 17, -4, s * 5, -20, OUT, 9); line(s * 17, -4, s * 5, -20, SKIN, 5.5); }
-  circle(0, -4, 12, OUT); circle(0, -4, 10, SKIN);
-  poly([-10, -2, -9, -10, 0, -15, 10, -10, 12, -1, 4, -7, -3, -4], "#ffd23f");
-  line(-8, -12, 8, -12, OUT, 4);
-  if (b.stun > 0) for (let i = 0; i < 3; i++) { const a = yard.t * 6 + i * TAU / 3; circle(Math.cos(a) * 18, -4 + Math.sin(a) * 18, 3.5, "#ffd23f"); }
-  c.restore();
-  if (full) text("NET FULL!", b.x, b.y - 34, 20, "#ff5a5a", { align: "center", outline: 6 });
-}
-
-// ---------------------------------------------------------------- popups --
-let popups = [];
-function popup(s, x, y, size, col, rise = 60, dur = 0.9) {
-  x = clamp(x, 110, W - 110);
-  popups.push({ s, x, y, size, col, rise, dur, age: 0, rot: rand(-0.12, 0.12) });
-}
-function drawPopups(dt) {
-  popups = popups.filter(p => (p.age += dt) < p.dur);
-  for (const p of popups) {
-    const u = Math.min(p.age / 0.15, 1), back = 1 + 2.7 * Math.pow(u - 1, 3) + 1.7 * Math.pow(u - 1, 2);
-    const sc = 0.4 + 0.6 * back, e = 1 - Math.pow(1 - p.age / p.dur, 3);
-    c.save(); c.globalAlpha = p.age > p.dur * 0.65 ? 1 - (p.age - p.dur * 0.65) / (p.dur * 0.35) : 1;
-    c.translate(p.x, p.y - p.rise * e); c.rotate(p.rot); c.scale(sc, sc);
-    text(p.s, 0, 0, p.size, p.col, { align: "center", base: "middle" });
-    c.restore();
-  }
-}
 
 // ============================================================= GAME STATE ==
 const REMARKS = ["Don't forget the deep end, sweetie!", "I pay you in exposure, you know.", "Love the shorts. Very... brave.",
@@ -465,22 +652,17 @@ let state = "title", G = null, items = [], lastFrame = performance.now();
 const boy = { x: 360, y: LOOP.y + LH, ang: -Math.PI / 2, head: { x: 360, y: 900 }, contents: [], moving: false, walk: 0, stun: 0 };
 const keys = new Set();
 
-function say(s, sec = 3) { yard.bubble = s; yard.bubbleTime = sec; if (G) G.remarkCd = rand(9, 14); }
+function say(s, sec = 3) { yard.bubble = s; yard.typed = 0; yard.bubbleTime = sec + s.length / 40; if (G) G.remarkCd = rand(9, 14); }
 
 function newTitle() {
-  state = "title"; G = null; popups = []; ripples = []; musicVolume(0.5);
-  items = ["leaf", "leaf", "duck", "ball", "sock", "dale"].map(k => {
-    const d = makeDebris(k), p = randPoolPoint(70); d.x = p.x; d.y = p.y;
-    const a = Math.random() * TAU; d.vx = Math.cos(a) * 20; d.vy = Math.sin(a) * 20; return d;
-  });
-  boy.contents = []; boy.stun = 0;
-  yard.bubble = "Pool's not gonna skim itself!"; yard.bubbleTime = 1e9; yard.kidX = -1; yard.binGlow = 0; yard.wind = { x: 0, y: 0 };
+  state = "title"; G = null; popups = []; ripples = []; items = []; musicVolume(0.5);
+  boy.contents = []; boy.stun = 0; yard.bubbleTime = 0; yard.kidX = -1; yard.binGlow = 0; yard.wind = { x: 0, y: 0 };
 }
 function newGame() {
   state = "play"; popups = []; ripples = []; items = []; musicVolume(0.5);
   G = { time: 0, tips: 0, scooped: 0, frogs: 0, naps: 0, ext: 0, stun: 0, contents: [],
     spawnCd: 1.5, gustCd: 16, gustTime: 0, gustDir: { x: 1, y: 0 }, gustLeaves: 0, wind: { x: 0, y: 0 },
-    frogCd: 22, dale: false, walkTo: null, queue: [], blocked: 0, kidTime: 0, remarkCd: 5, grossOver: 0, finishedAt: 0, fired: false, newBest: false };
+    frogCd: 22, dale: false, walkTo: null, queue: [], blocked: 0, kidTime: 0, remarkCd: 5, grossOver: 0, finishedAt: 0, fired: false, newBest: false, shownTips: 0 };
   boy.x = 360; boy.y = LOOP.y + LH; boy.contents = []; boy.ang = -Math.PI / 2;
   for (let i = 0; i < 4; i++) { const d = makeDebris("leaf"), p = randPoolPoint(); d.x = p.x; d.y = p.y; items.push(d); }
   say("Pool's filthy, hon. Get skimming!", 3.5);
@@ -700,114 +882,203 @@ function finish(fired) {
   if (AUTOPLAY) window.__result = { fired, tips: G.tips, scooped: G.scooped, frogs: G.frogs, naps: G.naps, time: G.time };
 }
 
-function updateTitle(dt) {
-  for (const d of items) updateDebris(d, dt, { x: 0, y: 0 });
-  const t = yard.t, s = LW + LH + LW / 2 + Math.sin(t * 0.4) * (LW / 2 - 10);
-  const p = loopPoint(s); boy.x = p.x; boy.y = p.y; boy.moving = Math.abs(Math.cos(t * 0.4)) > 0.2; if (boy.moving) boy.walk += dt * 12;
-  boy.ang = -Math.PI / 2;
-  const r = 40 + 60 * (0.5 + 0.5 * Math.sin(t * 1.7)), rim = poolPoint(boy);
-  boy.head = { x: rim.x, y: rim.y - r };
-}
+function updateTitle(dt) {}   // the title screen is purely decorative
 
-// ================================================================== DRAW ==
-const BTN = { quit: [652, 14, 56, 56], toTitle: [240, 1010, 240, 70] };
+// ========================================================= HUD & SCREENS ==
+const BTN = { quit: [654, 6, 60, 60], yes: [150, 990, 180, 72], no: [390, 990, 180, 72] };
 const inBtn = (b, x, y) => x >= b[0] && x <= b[0] + b[2] && y >= b[1] && y <= b[1] + b[3];
-function button(b, label, size = 32) {
-  rrect(b[0], b[1] + 4, b[2], b[3], 14, "rgba(0,0,0,0.3)"); rrect(b[0] - 3, b[1] - 3, b[2] + 6, b[3] + 6, 16, OUT);
-  rrect(b[0], b[1], b[2], b[3], 13, "#fff6d5");
-  text(label, b[0] + b[2] / 2, b[1] + b[3] / 2 + 2, size, OUT, { align: "center", base: "middle", outline: 0 });
-}
-function drawHud() {
-  text(`TIPS $${G.tips}`, 20, 60, 42, "#7ee081");
-  const left = Math.max(SHIFT_LENGTH - G.time, 0);
-  text(`${Math.floor(left / 60)}:${String(Math.floor(left % 60)).padStart(2, "0")}`, 470, 60, 44, "#fff", { align: "center" });
-  if (state === "play") button(BTN.quit, "✕", 28);
-  text("GROSS-O-METER", 20, 104, 20, "#fff", { font: BODY, outline: 6 });
-  const k = clamp(gross() / GROSS_MAX, 0, 1);
-  rect(200, 88, 500, 20, OUT);
-  const col = k < 0.5 ? mixC([126, 224, 129], [255, 210, 63], k * 2) : mixC([255, 210, 63], [255, 59, 59], k * 2 - 1);
-  rect(203, 91, 494 * k, 14, G.grossOver > 0 && (yard.t % 0.3) < 0.15 ? "#fff" : col);
-  if (G.time < 14) {
-    c.save(); c.globalAlpha = clamp(14 - G.time, 0, 1);
-    ["Tap junk to send Pool Boy (3 at a time)", "Tap it again to cancel", "Don't poke Uncle Dale!"].forEach((s, i) =>
-      text(s, 20, 1150 + i * 40, 26, "#fff", { font: BODY, outline: 7 }));
-    c.restore();
+
+// Rolling odometer (like an RPG's HP meter): digits scroll as the value climbs.
+function odometer(x, y, value, digits = 3) {
+  const cw = 11, ch = 16;
+  for (let i = 0; i < digits; i++) {
+    const place = Math.pow(10, digits - 1 - i), bx = x + i * (cw + 1);
+    R(bx, y, cw, ch, INK); R(bx + 1, y + 1, cw - 2, ch - 2, WHITE);
+    const whole = Math.floor(value / place) % 10;
+    const frac = place === 1 ? value % 1 : clamp((value % place) / (place / 10) - 9, 0, 1);
+    const off = Math.round(frac * (ch - 2));
+    g.save(); g.beginPath(); g.rect(bx + 1, y + 1, cw - 2, ch - 2); g.clip();
+    txt(String(whole), bx + 3, y + 3 - off, INK);
+    txt(String((whole + 1) % 10), bx + 3, y + 3 - off + (ch - 2), INK);
+    g.restore();
   }
 }
-const mixC = (a, b, t) => `rgb(${a.map((v, i) => Math.round(v + (b[i] - v) * t)).join(",")})`;
+function drawHud(dt) {
+  G.shownTips += clamp(G.tips - G.shownTips, -40 * dt, 25 * dt);
+  win(2, 2, 66, 38);
+  txt("TIPS", 8, 7, WHITE);
+  txt("$", 8, 21, C.green, { scale: 1 });
+  odometer(15, 18, Math.max(0, G.shownTips));
+  win(164, 2, 52, 20);
+  const left = Math.max(SHIFT_LENGTH - G.time, 0);
+  txt(`${Math.floor(left / 60)}:${String(Math.floor(left % 60)).padStart(2, "0")}`, 190, 5, left < 15 && (yard.t % 1) < 0.5 ? C.red : WHITE, { align: "center", scale: 2 });
+  win(218, 2, 20, 20); txt("x", 228, 6, WHITE, { align: "center", scale: 2 });
+  win(164, 24, 74, 16);
+  txt("GROSS", 169, 28, WHITE);
+  const k = clamp(gross() / GROSS_MAX, 0, 1), bw = 36;
+  R(199, 28, bw + 2, 8, WHITE); R(200, 29, bw, 6, INK);
+  const col = k < 0.5 ? C.green : k < 0.8 ? C.yellow : C.red;
+  R(200, 29, Math.round(bw * k), 6, G.grossOver > 0 && (yard.t % 0.3) < 0.15 ? WHITE : col);
+}
+
+// The dialog window: Mrs. Henderson's remarks type out letter by letter.
+function drawDialog(dt) {
+  let msg = "", typed = Infinity;
+  if (yard.bubbleTime > 0 && yard.bubble) {
+    msg = "• " + yard.bubble;
+    const before = Math.floor(yard.typed);
+    yard.typed += dt * 40; typed = Math.floor(yard.typed);
+    if (typed !== before && typed < msg.length && msg[typed] !== " " && typed % 2 === 0) play("blip", 1, 0.25);
+  } else if (G && G.time < 16) msg = "• Tap junk to send Pool Boy after it. Tap again to cancel. Full net? He dumps it himself.";
+  if (!msg) return;
+  const lines = wrapPx(msg, 222);
+  win(3, 362, 234, 14 + lines.length * 11);
+  let left = typed;
+  lines.forEach((l, i) => {
+    const shown = left >= l.length ? l : l.slice(0, Math.max(0, left));
+    left -= l.length + 1;
+    if (shown) txt(shown, 10, 369 + i * 11, WHITE);
+  });
+}
+
+function drawQueue(dt) {
+  if (state === "play") G.queue.forEach((d, i) => {
+    const cx = px(d.x), cy = px(d.y), pulse = i === 0 && (yard.t % 0.5) < 0.25 ? 1 : 0;
+    ringPx(cx, cy, Math.round(d.r / 3) + 5 + pulse, i === 0 ? C.yellow : WHITE);
+    const my = cy - Math.round(d.r / 3) - 14;
+    R(cx, my + 9, 1, 3, INK);
+    win(cx - 6, my - 2, 13, 13);
+    txt(String(i + 1), cx + 1, my + 1, i === 0 ? C.yellow : WHITE, { align: "center" });
+  });
+  taps = taps.filter(t => (t.age += dt) < 0.35);
+  for (const t of taps) ringPx(px(t.x), px(t.y), 3 + t.age * 30, t.hit ? WHITE : C.red);
+}
+
+function drawWorld(dt) {
+  g.drawImage(ground, 0, 0);
+  drawWater();
+  for (const d of items) if (d.kind === "dale") drawDebris(d);
+  for (const d of items) if (d.kind !== "dale") drawDebris(d);
+  drawQueue(dt);
+  drawBoy(boy);
+  if (yard.kidX >= 0) {
+    const kx = px(yard.kidX);
+    g.drawImage(SPR.kid, kx - 5, 7);
+    R(kx - 8, 15, 3, 3, INK); R(kx + 6, 15, 3, 3, INK); R(kx - 7, 15, 2, 2, "#f8c890"); R(kx + 6, 15, 2, 2, "#f8c890");
+  }
+  g.drawImage(fenceLayer, 0, 0);
+  // trash can (glows when the net is full)
+  const bx = px(BIN.x), by = px(BIN.y);
+  oval(bx, by + 5, 8, 2, "rgba(0,0,0,0.3)");
+  if (yard.binGlow && (yard.t % 0.4) < 0.2) { ringPx(bx, by, 12, C.yellow); ringPx(bx, by, 13, C.yellow); }
+  g.drawImage(SPR.bin, bx - 7, by - 6);
+  drawMrsHenderson();
+  // tree canopy on top (dithered when you're under it)
+  g.drawImage(yard.canopyAlpha < 0.7 ? canopyDither : canopy, px(TREE.x) - 40, px(TREE.y) - 52);
+  const wl = Math.hypot(yard.wind.x, yard.wind.y);
+  if (wl > 20) {
+    const dx = yard.wind.x / wl, dy = yard.wind.y / wl;
+    for (let i = 0; i < 12; i++) {
+      let x = ((i * 67 + yard.t * wl) % 300) - 30; const y = 60 + i * 26;
+      if (dx < 0) x = RW - x;
+      linePx(x, y, x + dx * 18, y + dy * 18, WHITE, 1);
+    }
+  }
+}
+
+// Psychedelic swirling backdrop, the RPG battle-screen kind.
+const BG_PAL = [[248, 168, 200], [248, 120, 176], [176, 128, 248], [120, 200, 248], [120, 240, 200], [248, 232, 128]].map(([r, gg, b]) => (255 << 24) | (b << 16) | (gg << 8) | r);
+const bgCanvas = document.createElement("canvas"); bgCanvas.width = RW / 2; bgCanvas.height = Math.ceil(RH / 2);
+const bgCtx = bgCanvas.getContext("2d"), bgImg = bgCtx.createImageData(bgCanvas.width, bgCanvas.height), bgBuf = new Uint32Array(bgImg.data.buffer);
+function battleBg(t, dark = 0) {
+  const w = bgCanvas.width, h = bgCanvas.height;
+  for (let y = 0; y < h; y++) {
+    const off = Math.sin(y * 0.11 + t * 1.8) * 7;
+    for (let x = 0; x < w; x++) {
+      const dx = x + off - w / 2, dy = (y - h / 2) * 0.8;
+      const v = Math.sqrt(dx * dx + dy * dy) * 0.18 + Math.sin(Math.atan2(dy, dx) * 4 + t) * 0.8 - t * 2.2;
+      bgBuf[y * w + x] = BG_PAL[((Math.floor(v) % 6) + 6) % 6];
+    }
+  }
+  bgCtx.putImageData(bgImg, 0, 0);
+  g.drawImage(bgCanvas, 0, 0, w * 2, h * 2);
+  if (dark) R(0, 0, RW, RH, `rgba(8,8,24,${dark})`);
+}
+
+function drawTitle() {
+  const t = yard.t;
+  battleBg(t);
+  const bob = Math.round(Math.sin(t * 3) * 2);
+  txt("POOL", RW / 2, 46 + bob, C.yellow, { align: "center", scale: 6, outline: INK });
+  txt("BOY", RW / 2, 96 - bob, C.yellow, { align: "center", scale: 6, outline: INK });
+  win(28, 152, 184, 34);
+  txt("Skim the pool. Dodge Uncle Dale.", RW / 2, 159, WHITE, { align: "center" });
+  txt("Survive Mrs. Henderson.", RW / 2, 171, WHITE, { align: "center" });
+  // Pool Boy struts in place, with junk orbiting him
+  const tb = { x: W / 2, y: 820, ang: Math.PI / 2, moving: true, walk: t * 12, contents: [], stun: 0, head: { x: W / 2, y: 900 } };
+  const spr = BOY.down[Math.floor(t * 4) % 2];
+  oval(RW / 2, 276, 14, 4, "rgba(0,0,0,0.3)");
+  g.drawImage(spr, RW / 2 - spr.width * 1.5, 276 - spr.height * 3, spr.width * 3, spr.height * 3);
+  ["duck", "sock", "pizza", "toupee", "frog", "phone"].forEach((k, i) => {
+    const a = t * 0.8 + i * TAU / 6, s = SPR[k];
+    g.drawImage(s, Math.round(RW / 2 + Math.cos(a) * 62 - s.width / 2), Math.round(244 + Math.sin(a) * 26 - s.height / 2));
+  });
+  if ((t % 1) < 0.65) txt("TAP TO START", RW / 2, 306, WHITE, { align: "center", scale: 2, outline: INK });
+  win(14, 336, 212, 50);
+  txt("• Tap junk to send Pool Boy after it.", 22, 344, WHITE);
+  txt("• Queue up to 3 at a time.", 22, 356, WHITE);
+  txt(bestTips > 0 ? `• Best shift: $${bestTips}` : "• Don't poke Uncle Dale.", 22, 368, WHITE);
+}
 
 function drawResults() {
-  const a = Math.min((performance.now() - G.finishedAt) / 400, 1);
-  c.save(); c.globalAlpha = a;
-  rect(0, 0, W, H, "rgba(13,31,51,0.8)");
-  const cx = W / 2;
-  text(G.fired ? "YOU'RE FIRED!" : "SHIFT OVER!", cx, 270, 72, G.fired ? "#ff5a5a" : "#fff", { align: "center" });
-  text(`$${G.tips} in tips`, cx, 390, 84, "#7ee081", { align: "center" });
+  const t = yard.t, since = (performance.now() - G.finishedAt) / 1000;
+  battleBg(t, 0.25);
+  win(20, 30, 200, 30);
+  txt(G.fired ? "YOU'RE FIRED!" : "SHIFT OVER!", RW / 2, 38, G.fired ? C.red : WHITE, { align: "center", scale: 2 });
+  win(20, 68, 200, 130);
+  txt("TIPS", 32, 78, WHITE);
+  txt("$", 32, 94, C.green);
+  const shown = Math.min(G.tips, since * 120);
+  odometer(40, 90, shown);
   const rank = G.fired ? "Terminated for Gross Negligence" : G.rank[1];
-  text(rank, cx, 470, rank.length > 22 ? 34 : 44, "#ffd23f", { align: "center" });
-  text(G.newBest ? "NEW BEST!" : `Best: $${bestTips}`, cx, 530, 30, "#fff", { align: "center", font: BODY, outline: 7 });
-  [`Junk scooped: ${G.scooped}`, `Frogs rescued: ${G.frogs}`, `Naps ruined: ${G.naps}`].forEach((s, i) =>
-    text(s, cx, 600 + i * 44, 30, "#fff", { align: "center", font: BODY, outline: 7 }));
-  text("Mrs. Henderson says:", cx, 780, 28, "#fff6d5", { align: "center" });
-  wrap(G.fired ? "“I've seen cleaner swamps.”" : G.rank[2], 600, 28, BODY).forEach((l, i) =>
-    text(l, cx, 822 + i * 38, 28, "#fff6d5", { align: "center", font: BODY, outline: 7 }));
-  if (performance.now() - G.finishedAt > 1000) {
-    text("TAP FOR ANOTHER SHIFT", cx, 960, 46, "#7ee081", { align: "center" });
-    button(BTN.toTitle, "Title screen", 30);
+  txt(rank, RW / 2, 116, C.yellow, { align: "center" });
+  txt(G.newBest ? "NEW BEST!" : `Best: $${bestTips}`, RW / 2, 130, WHITE, { align: "center" });
+  [`Junk scooped ...... ${G.scooped}`, `Frogs rescued ..... ${G.frogs}`, `Naps ruined ....... ${G.naps}`].forEach((s, i) =>
+    txt(s, 36, 148 + i * 13, WHITE));
+  const quote = "• Mrs. Henderson: " + (G.fired ? "“I've seen cleaner swamps.”" : G.rank[2]);
+  const lines = wrapPx(quote, 186);
+  win(20, 206, 200, 14 + lines.length * 11);
+  lines.forEach((l, i) => txt(l, 28, 213 + i * 11, WHITE));
+  if (since > 1) {
+    win(40, 316, 160, 42);
+    txt("Try another shift?", RW / 2, 324, WHITE, { align: "center" });
+    const blink = (t % 0.6) < 0.4;
+    txt((blink ? "▶" : " ") + "Yes", 62, 340, WHITE);
+    txt("No", 140, 340, WHITE);
   }
-  c.restore();
 }
 
-function drawTitleText() {
-  const t = yard.t;
-  c.save(); c.translate(W / 2, 470); c.rotate(Math.sin(t * 2.6) * 0.03);
-  text("POOL", 0, -70, 150, "#ffd23f", { align: "center", outline: 26 });
-  text("BOY", 0, 80, 150, "#ffd23f", { align: "center", outline: 26 });
-  c.restore();
-  ["Skim the pool. Dodge Uncle Dale.", "Survive Mrs. Henderson."].forEach((s, i) =>
-    text(s, W / 2, 640 + i * 42, 32, "#fff", { align: "center", font: BODY, outline: 8 }));
-  c.save(); c.globalAlpha = 0.55 + 0.45 * Math.abs(Math.sin(t * 3));
-  text("TAP TO START", W / 2, 800, 64, "#7ee081", { align: "center" });
-  c.restore();
-  if (bestTips > 0) text(`Best shift: $${bestTips}`, 20, 60, 34, "#fff");
-  ["Tap junk to send Pool Boy after it", "Queue up to 3 at a time"].forEach((s, i) =>
-    text(s, 20, 1170 + i * 40, 26, "#fff", { font: BODY, outline: 7 }));
-}
-
+// ================================================================== FRAME ==
 function frame(now) {
-  const dt = Math.min((now - lastFrame) / 1000, 0.05); lastFrame = now;
+  // Clamp: the first rAF timestamp can predate script start, which would give a negative step.
+  const dt = clamp((now - lastFrame) / 1000, 0, 0.05); lastFrame = now;
   yard.t += dt; yard.bubbleTime = Math.max(yard.bubbleTime - dt, 0);
   ripples = ripples.filter(r => (r.age += dt) < 1.2);
   if (state === "play") updatePlay(dt);
   else if (state === "title") updateTitle(dt);
   else for (const d of items) updateDebris(d, dt, { x: 0, y: 0 });
 
-  c.setTransform(1, 0, 0, 1, 0, 0); c.fillStyle = "#3f7a34"; c.fillRect(0, 0, cv.width, cv.height);
-  const k = view.s * view.dpr; c.setTransform(k, 0, 0, k, view.ox * view.dpr, view.oy * view.dpr);
-  c.save(); c.beginPath(); c.rect(0, 0, W, H); c.clip();
-  drawGround();
-  for (const d of items) drawDebris(d);
-  drawBoy(boy);
-  if (state !== "title") drawQueue(dt);
-  drawTop();
-  if (state === "title") drawTitleText(); else drawHud();
+  if (state === "title") drawTitle();
+  else if (state === "results") drawResults();
+  else { drawWorld(dt); drawHud(dt); drawDialog(dt); }
   drawPopups(dt);
-  if (state === "results") drawResults();
-  c.restore();
-  requestAnimationFrame(frame);
-}
 
-function drawQueue(dt) {
-  if (state === "play") G.queue.forEach((d, i) => {
-    const pulse = i === 0 ? 1 + 0.12 * Math.sin(yard.t * 8) : 1;
-    ring(d.x, d.y, (d.r + 10) * pulse, i === 0 ? "#ffd23f" : "rgba(255,210,63,0.7)", 4);
-    const my = d.y - d.r - 30;
-    line(d.x, d.y - d.r - 8, d.x, my, OUT, 3);
-    circle(d.x, my, 17, OUT); circle(d.x, my, 14, i === 0 ? "#ffd23f" : "#fff6d5");
-    text(String(i + 1), d.x, my + 2, 22, OUT, { align: "center", base: "middle", outline: 0 });
-  });
-  taps = taps.filter(t => (t.age += dt) < 0.4);
-  for (const t of taps) ring(t.x, t.y, 14 + t.age * 70, t.hit ? `rgba(255,255,255,${1 - t.age * 2.5})` : `rgba(255,90,90,${1 - t.age * 2.5})`, 3);
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.fillStyle = "#100c18"; c.fillRect(0, 0, cv.width, cv.height);
+  c.imageSmoothingEnabled = false;
+  const k = view.s * view.dpr;
+  c.drawImage(lo, 0, 0, RW, RH, Math.round(view.ox * view.dpr), Math.round(view.oy * view.dpr), Math.round(RW * PX * k), Math.round(RH * PX * k));
+  requestAnimationFrame(frame);
 }
 
 // ================================================================= INPUT ==
@@ -827,7 +1098,10 @@ cv.addEventListener("pointerup", e => {
   const p = toLogical(e);
   if (state === "play") { if (inBtn(BTN.quit, p.x, p.y)) newTitle(); return; }
   if (state === "title") { newGame(); return; }
-  if (state === "results" && performance.now() - G.finishedAt > 1000) { if (inBtn(BTN.toTitle, p.x, p.y)) newTitle(); else newGame(); }
+  if (state === "results" && performance.now() - G.finishedAt > 1000) {
+    if (inBtn(BTN.yes, p.x, p.y)) newGame();
+    else if (inBtn(BTN.no, p.x, p.y)) newTitle();
+  }
 }, { passive: false });
 for (const ev of ["touchstart", "touchmove", "touchend", "gesturestart", "dblclick", "contextmenu"]) {
   cv.addEventListener(ev, e => { e.preventDefault(); if (ev === "touchend") unlockAudio(); }, { passive: false });
@@ -855,6 +1129,5 @@ document.addEventListener("visibilitychange", () => {
 resize();
 newTitle();
 if (AUTOPLAY) newGame();
-const fontsReady = document.fonts ? Promise.race([document.fonts.load('40px "Lilita One"'), new Promise(r => setTimeout(r, 1500))]) : Promise.resolve();
-fontsReady.then(() => requestAnimationFrame(frame));
+requestAnimationFrame(frame);
 </script>

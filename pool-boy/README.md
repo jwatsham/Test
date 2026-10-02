@@ -29,6 +29,11 @@ and every sound effect) is synthesized at startup.
 - He never reaches through Uncle Dale. He waits for Dale to drift off, and gives up on an
   item after 2.5 seconds.
 
+It's drawn in a 16-bit suburban-RPG pixel style (EarthBound-inspired, with all original art):
+the game renders into a 240x427 pixel buffer that's scaled up crisply, with hand-made sprites
+and a built-in bitmap font. The UI is retro-RPG style too: black bordered windows, a rolling
+tips odometer, typewriter dialog, and swirling title and results backgrounds.
+
 Arrow keys and Space work on desktop. Add `#autoplay` to the URL to watch the bot play. Like the Rhythm
 Chiropractor web build, it's written as an HTML fragment for publishing as a Claude
 artifact.
