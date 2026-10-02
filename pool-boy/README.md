@@ -17,6 +17,17 @@ fired.
 No asset files are needed. All art is drawn in code and all audio (the lounge music loop
 and every sound effect) is synthesized at startup.
 
+## Phone version
+
+`web/index.html` is a single-file JavaScript port laid out for portrait phones. Touch junk
+in the water and Pool Boy walks around the edge to it and reaches the net to your finger.
+Drag to follow drifting junk. Tap the deck or the trash can to walk there. Arrow keys and
+Space work on desktop. Add `#autoplay` to the URL to watch the bot play. Like the Rhythm
+Chiropractor web build, it's written as an HTML fragment for publishing as a Claude
+artifact.
+
+The Godot project is the main version. Gameplay changes need to be made in both places.
+
 ## Controls
 
 | Action | Keyboard | Gamepad |

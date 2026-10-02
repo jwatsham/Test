@@ -1,0 +1,814 @@
+<title>Pool Boy</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Nunito:wght@800&display=swap">
+<style>
+/* Layout: one full-viewport canvas; a fixed 720x1280 portrait backyard is letterboxed inside it. */
+:root {
+  --bg: #3f7a34;   /* lawn shade for the letterbox */
+  --fg: #fff6d5;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+#game { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
+</style>
+
+<canvas id="game" tabindex="0" aria-label="Pool Boy game. Touch junk in the pool to scoop it."></canvas>
+
+<script>
+"use strict";
+// ============================================================================
+// Pool Boy (web / portrait). Port of the Godot prototype in pool-boy/.
+// All art is drawn on a canvas; all audio is synthesized at load time.
+// ============================================================================
+
+const W = 720, H = 1280, TAU = Math.PI * 2;
+const OUT = "#1f1a29";
+const DISPLAY = '"Lilita One", "Arial Black", Impact, sans-serif';
+const BODY = 'Nunito, "Arial Rounded MT Bold", "Helvetica Neue", Arial, sans-serif';
+const AUTOPLAY = location.hash === "#autoplay";
+
+// ----------------------------------------------------------------- tuning --
+const SHIFT_LENGTH = 120, SPEED = 360, PLAYER_R = 20, MAX_REACH = 250;
+const EXTEND_RATE = 2.6, RETRACT_RATE = 4.5, CAPACITY = 5;
+const GROSS_MAX = 35, GROSS_GRACE = 4, DUMP_RADIUS = 60, FULL_NET_BONUS = 5, DALE_PENALTY = 5;
+const NET_R = 30;
+
+// ----------------------------------------------------------------- layout --
+const rectGrow = (r, g) => ({ x: r.x - g, y: r.y - g, w: r.w + 2 * g, h: r.h + 2 * g });
+const POOL = { x: 150, y: 250, w: 420, h: 760 };
+const DECK = rectGrow(POOL, 70);
+const LOOP = rectGrow(POOL, PLAYER_R + 4);   // the line Pool Boy's feet walk along
+const BIN = { x: 112, y: 1048 }, TREE = { x: 58, y: 150 }, HOME = { x: 628, y: 1172 };
+const FENCE_H = 130;
+
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const inRect = (p, r) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+const poolPoint = p => ({ x: clamp(p.x, POOL.x, POOL.x + POOL.w), y: clamp(p.y, POOL.y, POOL.y + POOL.h) });
+function intoPool(p) {
+  const q = poolPoint(p); let dx = q.x - p.x, dy = q.y - p.y, l = Math.hypot(dx, dy);
+  if (l < 0.01) { dx = POOL.x + POOL.w / 2 - p.x; dy = POOL.y + POOL.h / 2 - p.y; l = Math.hypot(dx, dy) || 1; }
+  return { x: dx / l, y: dy / l };
+}
+const rand = (a, b) => a + Math.random() * (b - a);
+const pick = a => a[Math.floor(Math.random() * a.length)];
+const randPoolPoint = (m = 40) => ({ x: rand(POOL.x + m, POOL.x + POOL.w - m), y: rand(POOL.y + m, POOL.y + POOL.h - m) });
+
+// Walking loop around the pool, parameterized by distance s (clockwise from top-left).
+const LW = LOOP.w, LH = LOOP.h, PER = 2 * (LW + LH);
+function loopPoint(s) {
+  s = ((s % PER) + PER) % PER;
+  if (s < LW) return { x: LOOP.x + s, y: LOOP.y }; s -= LW;
+  if (s < LH) return { x: LOOP.x + LW, y: LOOP.y + s }; s -= LH;
+  if (s < LW) return { x: LOOP.x + LW - s, y: LOOP.y + LH }; s -= LW;
+  return { x: LOOP.x, y: LOOP.y + LH - s };
+}
+function loopS(p) {
+  const x = clamp(p.x, LOOP.x, LOOP.x + LW), y = clamp(p.y, LOOP.y, LOOP.y + LH);
+  const dt = y - LOOP.y, dr = LOOP.x + LW - x, db = LOOP.y + LH - y, dl = x - LOOP.x;
+  const m = Math.min(dl, dr, dt, db);
+  if (m === dt) return x - LOOP.x;
+  if (m === dr) return LW + (y - LOOP.y);
+  if (m === db) return LW + LH + (LOOP.x + LW - x);
+  return 2 * LW + LH + (LOOP.y + LH - y);
+}
+
+// ---------------------------------------------------------------- storage --
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("pb_" + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem("pb_" + k, JSON.stringify(v)); } catch (e) {} },
+};
+let bestTips = store.get("best", 0);
+
+// ================================================================== SYNTH ==
+const RATE = 22050;
+let _seed = 11;
+const rnd = () => ((_seed = (_seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+const nz = () => rnd() * 2 - 1;
+const midi = n => 440 * Math.pow(2, (n - 69) / 12);
+
+function musicLoop(bpm = 104) {
+  _seed = 11;
+  const beat = Math.round(60 / bpm * RATE), e = beat / 2 | 0, b = new Float32Array(beat * 16), N = b.length;
+  const add = (i, v) => { b[i % N] += v; };
+  const kick = (at, vol) => { let ph = 0; for (let i = 0; i < 0.25 * RATE; i++) { const t = i / RATE; ph += TAU * (50 + 90 * Math.exp(-t * 35)) / RATE; add(at + i, Math.sin(ph) * Math.exp(-t * 12) * vol); } };
+  const shaker = (at, vol) => { let prev = 0; for (let i = 0; i < 0.07 * RATE; i++) { const t = i / RATE, x = nz(); add(at + i, (x - prev) * Math.min(t * 200, 1) * Math.exp(-t * 55) * vol); prev = x; } };
+  const marimba = (at, note, vol) => { const f = midi(note); for (let i = 0; i < 0.6 * RATE; i++) { const t = i / RATE; add(at + i, (Math.sin(TAU * f * t) * Math.exp(-t * 7) + 0.35 * Math.sin(TAU * f * 4 * t) * Math.exp(-t * 30)) * Math.min(t * 400, 1) * vol); } };
+  const bass = (at, note, len, vol) => { const f = midi(note), n = len * RATE | 0; for (let i = 0; i < n; i++) { const t = i / RATE; add(at + i, (Math.sin(TAU * f * t) + 0.25 * Math.sin(TAU * f * 2 * t)) * Math.min(t * 150, 1) * Math.exp(-t * 2.5) * Math.min((n - i) / (0.02 * RATE), 1) * vol); } };
+  const chords = [[57, 60, 64, 67], [55, 59, 62, 65], [53, 57, 60, 64], [52, 56, 59, 62]], roots = [45, 43, 41, 40];
+  for (let bar = 0; bar < 4; bar++) {
+    const b0 = bar * beat * 4, root = roots[bar];
+    for (let k = 0; k < 4; k++) kick(b0 + k * beat, k % 2 ? 0.25 : 0.45);
+    for (let s = 0; s < 8; s++) shaker(b0 + s * e, s % 2 ? 0.16 : 0.10);
+    for (const [pos, iv, len] of [[0, 0, 1.4], [3, 7, 0.4], [4, 0, 1.4], [7, 7, 0.4]]) bass(b0 + pos * e, root + iv, len * 60 / bpm, 0.3);
+    for (const pos of [0, 3, 6]) for (const n of chords[bar]) marimba(b0 + pos * e, n + 12, 0.045);
+  }
+  for (let i = 0; i < N; i++) b[i] = Math.tanh(b[i] * 1.2);
+  return b;
+}
+function sfx(seconds, fn) { const b = new Float32Array(seconds * RATE | 0); fn(b); return b; }
+const RAW = {
+  music: musicLoop(),
+  scoop: sfx(0.18, b => { let ph = 0; for (let i = 0; i < b.length; i++) { const t = i / RATE; ph += TAU * (300 + 900 * t / 0.18) / RATE; b[i] = Math.sin(ph) * Math.sin(Math.PI * t / 0.18) * 0.5; } }),
+  splash: sfx(0.45, b => { _seed = 3; let lp = 0; for (let i = 0; i < b.length; i++) { const t = i / RATE; lp += (nz() - lp) * (0.5 - t * 0.9); b[i] = lp * Math.min(t * 80, 1) * Math.exp(-t * 7) * 0.9; } }),
+  dump: sfx(0.6, b => { for (let i = 0; i < b.length; i++) { const t = i / RATE; let s = 0; for (const f of [310, 497, 731, 1180]) s += Math.sin(TAU * f * t) * Math.exp(-t * (6 + f / 200)); b[i] = s * 0.18; } }),
+  hey: sfx(0.4, b => { let ph = 0; for (let i = 0; i < b.length; i++) { const t = i / RATE; ph += TAU * (260 - t * 200) / RATE; b[i] = Math.tanh(Math.sin(ph) * 5) * Math.min(t * 60, 1) * Math.min((0.4 - t) * 12, 1) * 0.25; } }),
+  ribbit: sfx(0.32, b => { let ph = 0; for (let i = 0; i < b.length; i++) { const t = i / RATE; ph += TAU * (140 + 60 * Math.sin(TAU * 30 * t)) / RATE; b[i] = Math.tanh(Math.sin(ph) * 4) * ((t % 0.16) < 0.09 ? 1 : 0) * 0.3; } }),
+  whistle: sfx(0.8, b => { let ph = 0; for (let i = 0; i < b.length; i++) { const t = i / RATE; ph += TAU * (2300 + 120 * Math.sin(TAU * 28 * t)) / RATE; b[i] = Math.sin(ph) * Math.min(t * 40, 1) * Math.min((0.8 - t) * 10, 1) * 0.25; } }),
+  womp: sfx(1.0, b => { let ph = 0; for (let i = 0; i < b.length; i++) { const t = i / RATE; const f = t < 0.2 ? 330 : t < 0.4 ? 311 : t < 0.6 ? 294 : 277 - (t - 0.6) * 40; ph += TAU * f * (1 + 0.02 * Math.sin(TAU * 6 * t)) / RATE; const gap = (t % 0.2) < 0.015 && t < 0.65 ? 0.3 : 1; b[i] = Math.tanh(Math.sin(ph) * 3) * gap * Math.min((1 - t) * 5, 1) * 0.28; } }),
+  gust: sfx(1.2, b => { _seed = 5; let lp = 0; for (let i = 0; i < b.length; i++) { const t = i / RATE; lp += (nz() - lp) * 0.05; b[i] = lp * Math.sin(Math.PI * t / 1.2) * 1.4; } }),
+};
+
+// ================================================================== AUDIO ==
+let actx = null, master = null, musicSrc = null, musicGain = null;
+const BUF = {};
+function unlockAudio() {
+  try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch (e) {}
+  if (!actx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    actx = new AC();
+    master = actx.createGain(); master.gain.value = 0.9; master.connect(actx.destination);
+    for (const k in RAW) {
+      const buf = actx.createBuffer(1, RAW[k].length, RATE);
+      const ch = buf.getChannelData(0);
+      for (let i = 0; i < ch.length; i++) ch[i] = clamp(RAW[k][i], -1, 1);
+      BUF[k] = buf;
+    }
+    const s = actx.createBufferSource(); s.buffer = actx.createBuffer(1, 1, RATE); s.connect(master); s.start();
+    musicGain = actx.createGain(); musicGain.gain.value = 0.5; musicGain.connect(master);
+    musicSrc = actx.createBufferSource(); musicSrc.buffer = BUF.music; musicSrc.loop = true; musicSrc.connect(musicGain); musicSrc.start();
+  }
+  if (actx.state !== "running") actx.resume().catch(() => {});
+}
+function play(name, rate = 1, vol = 1) {
+  if (!actx || !BUF[name]) return;
+  const src = actx.createBufferSource(); src.buffer = BUF[name]; src.playbackRate.value = rate;
+  const g = actx.createGain(); g.gain.value = vol; src.connect(g); g.connect(master); src.start();
+}
+function musicVolume(v) { if (musicGain) musicGain.gain.setTargetAtTime(v, actx.currentTime, 0.2); }
+
+// ================================================================ DRAWING ==
+const cv = document.getElementById("game");
+const c = cv.getContext("2d");
+let view = { s: 1, ox: 0, oy: 0, dpr: 1 };
+function resize() {
+  const r = cv.getBoundingClientRect(), dpr = Math.min(window.devicePixelRatio || 1, 3);
+  cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+  const s = Math.min(r.width / W, r.height / H);
+  view = { s, ox: (r.width - W * s) / 2, oy: (r.height - H * s) / 2, dpr };
+}
+window.addEventListener("resize", resize);
+
+function circle(x, y, r, col) { c.beginPath(); c.arc(x, y, Math.max(r, 0), 0, TAU); c.fillStyle = col; c.fill(); }
+function ellipse(x, y, rx, ry, col) { c.beginPath(); c.ellipse(x, y, rx, ry, 0, 0, TAU); c.fillStyle = col; c.fill(); }
+function line(x1, y1, x2, y2, col, w, cap = "round") { c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.strokeStyle = col; c.lineWidth = w; c.lineCap = cap; c.stroke(); }
+function poly(p, col) { c.beginPath(); c.moveTo(p[0], p[1]); for (let i = 2; i < p.length; i += 2) c.lineTo(p[i], p[i + 1]); c.closePath(); c.fillStyle = col; c.fill(); }
+function ring(x, y, r, col, w, a0 = 0, a1 = TAU) { c.beginPath(); c.arc(x, y, r, a0, a1); c.strokeStyle = col; c.lineWidth = w; c.lineCap = "round"; c.stroke(); }
+function rect(x, y, w, h, col) { c.fillStyle = col; c.fillRect(x, y, w, h); }
+function rrect(x, y, w, h, r, col) { c.beginPath(); c.roundRect ? c.roundRect(x, y, w, h, r) : c.rect(x, y, w, h); c.fillStyle = col; c.fill(); }
+function text(s, x, y, size, col, o = {}) {
+  c.font = `${size}px ${o.font || DISPLAY}`;
+  c.textAlign = o.align || "left"; c.textBaseline = o.base || "alphabetic";
+  const ow = o.outline === undefined ? size * 0.2 : o.outline;
+  if (ow > 0) { c.lineJoin = "round"; c.lineWidth = ow; c.strokeStyle = OUT; c.strokeText(s, x, y); }
+  c.fillStyle = col; c.fillText(s, x, y);
+}
+function wrap(s, maxW, size, font) {
+  c.font = `${size}px ${font}`;
+  const out = []; let cur = "";
+  for (const w of s.split(" ")) { const t = cur ? cur + " " + w : w; if (c.measureText(t).width > maxW && cur) { out.push(cur); cur = w; } else cur = t; }
+  if (cur) out.push(cur);
+  return out;
+}
+
+// ---------------------------------------------------------------- the yard --
+let ripples = [];
+const yard = { t: 0, wind: { x: 0, y: 0 }, kidX: -1, binGlow: 0, canopyAlpha: 1, bubble: "", bubbleTime: 0 };
+
+function drawGround() {
+  rect(0, 0, W, H, "#7cc45a");
+  for (let x = 0; x < W; x += 64) rect(x, 0, 32, H, "rgba(255,255,255,0.06)");
+  rect(0, 0, W, FENCE_H, "#b07b4a");
+  for (let x = 0; x < W; x += 28) line(x, 0, x, FENCE_H, "#8c5a2b", 2, "butt");
+  rect(0, FENCE_H - 6, W, 8, "#8c5a2b");
+  if (yard.kidX >= 0) {
+    const k = yard.kidX, y = FENCE_H - 8;
+    circle(k, y, 18, OUT); circle(k, y, 15, "#f1c27d");
+    ring(k, y - 4, 15, "#e63946", 8, Math.PI, TAU);
+    circle(k - 5, y + 2, 2.5, OUT); circle(k + 5, y + 2, 2.5, OUT);
+    ring(k, y + 6, 5, OUT, 2, 0.2, Math.PI - 0.2);
+  }
+  // deck
+  rect(DECK.x - 4, DECK.y - 4, DECK.w + 8, DECK.h + 8, OUT);
+  rect(DECK.x, DECK.y, DECK.w, DECK.h, "#e9d8b4");
+  for (let x = DECK.x; x < DECK.x + DECK.w; x += 46) line(x, DECK.y, x, DECK.y + DECK.h, "#d6c196", 2, "butt");
+  for (let y = DECK.y; y < DECK.y + DECK.h; y += 46) line(DECK.x, y, DECK.x + DECK.w, y, "#d6c196", 2, "butt");
+  // coping + water
+  const P = POOL;
+  rect(P.x - 14, P.y - 14, P.w + 28, P.h + 28, "#f7f3ea");
+  c.strokeStyle = OUT; c.lineWidth = 3; c.strokeRect(P.x - 14, P.y - 14, P.w + 28, P.h + 28);
+  rect(P.x - 2, P.y - 2, P.w + 4, P.h + 4, OUT);
+  rect(P.x, P.y, P.w, P.h, "#2fb6d9");
+  rect(P.x, P.y, P.w, 26, "#28a3c4");
+  for (let x = P.x + 40; x < P.x + P.w; x += 40) line(x, P.y, x, P.y + P.h, "rgba(255,255,255,0.07)", 1, "butt");
+  for (let y = P.y + 40; y < P.y + P.h; y += 40) line(P.x, y, P.x + P.w, y, "rgba(255,255,255,0.07)", 1, "butt");
+  c.strokeStyle = "rgba(191,242,255,0.35)"; c.lineWidth = 2.5; c.lineJoin = "round";
+  for (let row = 0; row < 18; row++) {
+    const y0 = P.y + 25 + row * 42; c.beginPath();
+    for (let i = 0; i <= 14; i++) { const x = P.x + i * P.w / 14, y = y0 + Math.sin(x * 0.03 + yard.t * 1.6 + row) * 6; i ? c.lineTo(x, y) : c.moveTo(x, y); }
+    c.stroke();
+  }
+  text("DEEP END  9 FT", P.x + P.w - 14, P.y + P.h - 16, 20, "rgba(255,255,255,0.5)", { align: "right", outline: 0, font: BODY });
+  for (const r of ripples) { const k = r.age / 1.2; ring(r.x, r.y, 10 + k * 50, `rgba(255,255,255,${0.7 * (1 - k)})`, 3); }
+  // ladder
+  const lx = P.x + P.w - 90;
+  for (const s of [-1, 1]) { line(lx + s * 16, P.y + P.h + 12, lx + s * 16, P.y + P.h - 36, OUT, 7); line(lx + s * 16, P.y + P.h + 12, lx + s * 16, P.y + P.h - 36, "#d0d4dc", 4); }
+  for (const y of [P.y + P.h - 12, P.y + P.h - 28]) line(lx - 16, y, lx + 16, y, "#d0d4dc", 4);
+  // trash can
+  const b = BIN;
+  if (yard.binGlow > 0) circle(b.x, b.y, 44 + 6 * Math.sin(yard.t * 8), "rgba(255,209,64,0.4)");
+  circle(b.x, b.y, 27, OUT); circle(b.x, b.y, 23, "#6b7686"); circle(b.x, b.y, 15, "#55606f");
+  line(b.x - 9, b.y, b.x + 9, b.y, OUT, 5);
+  text("TRASH", b.x, b.y + 50, 20, "#fff", { align: "center", outline: 6, font: BODY });
+  // tree trunk
+  circle(TREE.x, TREE.y, 22, OUT); circle(TREE.x, TREE.y, 18, "#7a4a26");
+}
+
+function drawTop() {
+  const t = yard.t, w = yard.wind, a = yard.canopyAlpha;
+  const sx = w.x * 0.03 + Math.sin(t * 1.3) * 2, sy = w.y * 0.03 + Math.cos(t * 1.1) * 2;
+  const blobs = [[0, 0], [-50, 30], [55, 20], [10, 60], [-20, -45], [60, -30]];
+  c.save(); c.globalAlpha = a;
+  for (const [x, y] of blobs) circle(TREE.x + x + sx, TREE.y + y + sy, 58, OUT);
+  for (const [x, y] of blobs) circle(TREE.x + x + sx, TREE.y + y + sy, 54, "#3f8f3a");
+  for (const [x, y] of blobs) circle(TREE.x + x + sx - 12, TREE.y + y + sy - 14, 26, "#56a84a");
+  c.restore();
+  const wl = Math.hypot(w.x, w.y);
+  if (wl > 20) {
+    const dx = w.x / wl, dy = w.y / wl;
+    for (let i = 0; i < 12; i++) {
+      let x = ((i * 197 + t * wl * 3) % 900) - 90; const y = 180 + i * 85;
+      if (dx < 0) x = W - x;
+      line(x, y, x + dx * 70, y + dy * 70, "rgba(255,255,255,0.45)", 3);
+    }
+  }
+  // Mrs. Henderson
+  const h = HOME;
+  rect(h.x - 26, h.y - 50, 52, 110, OUT); rect(h.x - 22, h.y - 46, 44, 102, "#f7f3ea");
+  for (let y = -40; y < 56; y += 12) line(h.x - 22, h.y + y, h.x + 22, h.y + y, "#3fc1e0", 4, "butt");
+  circle(h.x, h.y - 28, 17, OUT); circle(h.x, h.y - 28, 14, "#f5d0b0");
+  circle(h.x, h.y - 34, 22, OUT); circle(h.x, h.y - 34, 19, "#ffd166"); circle(h.x, h.y - 34, 9, "#e63946");
+  rect(h.x - 16, h.y - 10, 32, 40, "#9b5de5");
+  circle(h.x - 34, h.y + 10, 8, OUT); circle(h.x - 34, h.y + 10, 6, "#fff3b0");
+  text("MRS. HENDERSON", h.x - 6, h.y + 90, 17, "#fff", { align: "center", outline: 5, font: BODY });
+  if (yard.bubbleTime > 0 && yard.bubble) {
+    const lines = wrap(yard.bubble, 400, 24, BODY), lh = 30;
+    c.font = `24px ${BODY}`;
+    const bw = Math.max(...lines.map(l => c.measureText(l).width)) + 28, bh = lines.length * lh + 18;
+    const bx = Math.min(700 - bw, h.x - bw + 30), by = h.y - 82 - bh;
+    rrect(bx - 3, by - 3, bw + 6, bh + 6, 14, OUT); rrect(bx, by, bw, bh, 12, "#fff");
+    poly([bx + bw - 54, by + bh - 2, bx + bw - 26, by + bh - 2, h.x - 6, h.y - 58], "#fff");
+    lines.forEach((l, i) => text(l, bx + 14, by + 34 + i * lh, 24, OUT, { outline: 0, font: BODY }));
+  }
+}
+
+// ----------------------------------------------------------------- debris --
+const KINDS = {
+  leaf:    { name: "Leaf", r: 11, tips: 1, gross: 0.5, weight: 10, color: "#5aa83a" },
+  sock:    { name: "Soggy Sock", r: 13, tips: 3, gross: 3, weight: 2, color: "#f2f2f2" },
+  duck:    { name: "Rubber Duck", r: 13, tips: 2, gross: 0.5, weight: 2, color: "#ffd23f" },
+  pizza:   { name: "Pool Pizza", r: 15, tips: 4, gross: 4, weight: 1.5, color: "#ffd166" },
+  toupee:  { name: "Someone's Toupee", r: 15, tips: 6, gross: 3, weight: 1, color: "#5b3a1e" },
+  phone:   { name: "A Phone?!", r: 12, tips: 8, gross: 1, weight: 0.8, color: "#3a86ff" },
+  ball:    { name: "Beach Ball", r: 21, tips: 3, gross: 0.5, weight: 1.2, color: "#e63946" },
+  bandaid: { name: "Mystery Band-Aid", r: 10, tips: 5, gross: 6, weight: 0.8, color: "#e8b48a" },
+  frog:    { name: "FROG RESCUED!", r: 13, tips: 10, gross: 0, weight: 0 },
+  dale:    { name: "Uncle Dale", r: 50, tips: 0, gross: 0, weight: 0 },
+};
+function makeDebris(kind) {
+  const info = KINDS[kind];
+  return { kind, info, r: info.r, state: "float", x: 0, y: 0, vx: 0, vy: 0, rot: Math.random() * TAU,
+    spin: rand(-0.6, 0.6), t: Math.random() * 10, hopCd: 1, grumpy: 0, leaving: false,
+    tint: pick(["#5aa83a", "#e8892c", "#d9b330", "#a3502b"]), fx: 0, fy: 0, tx: 0, ty: 0, flyT: 0, flyDur: 1 };
+}
+function throwDebris(d, from, to, dur) {
+  Object.assign(d, { state: "fly", fx: from.x, fy: from.y, tx: to.x, ty: to.y, flyT: 0, flyDur: dur, x: from.x, y: from.y });
+}
+function updateDebris(d, dt, wind, onLand) {
+  d.t += dt; d.grumpy = Math.max(d.grumpy - dt, 0);
+  if (d.state === "fly") {
+    d.flyT += dt; const k = Math.min(d.flyT / d.flyDur, 1);
+    d.x = d.fx + (d.tx - d.fx) * k; d.y = d.fy + (d.ty - d.fy) * k; d.rot += d.spin * dt * 6;
+    if (k >= 1) {
+      d.state = "float"; const l = Math.hypot(d.tx - d.fx, d.ty - d.fy) || 1;
+      d.vx = (d.tx - d.fx) / l * 30; d.vy = (d.ty - d.fy) / l * 30;
+      if (onLand) onLand(d);
+    }
+    return;
+  }
+  if (d.kind === "frog" && (d.hopCd -= dt) <= 0) { d.hopCd = rand(0.8, 1.8); const a = Math.random() * TAU; d.vx += Math.cos(a) * 120; d.vy += Math.sin(a) * 120; }
+  d.rot += d.spin * dt; d.spin += (Math.sign(d.spin) * 0.3 - d.spin) * Math.min(dt, 1);
+  const mass = d.kind === "dale" ? 4 : 1;
+  const cx = POOL.x + POOL.w / 2, cy = POOL.y + POOL.h / 2;
+  const ox = (d.x - cx) / POOL.w, oy = (d.y - cy) / POOL.h, ol = Math.hypot(ox, oy) || 1;
+  d.vx += (-oy / ol * 6 + wind.x / mass) * dt; d.vy += (ox / ol * 6 + wind.y / mass) * dt;
+  const damp = Math.exp(-0.6 * dt); d.vx *= damp; d.vy *= damp;
+  d.x += d.vx * dt; d.y += d.vy * dt;
+  const x0 = POOL.x + d.r, x1 = POOL.x + POOL.w - d.r, y0 = POOL.y + d.r, y1 = POOL.y + POOL.h - d.r;
+  if (d.x < x0 || d.x > x1) d.vx *= -0.6;
+  if (d.y < y0 || d.y > y1) d.vy *= -0.6;
+  d.x = clamp(d.x, x0, x1); d.y = clamp(d.y, y0, y1);
+}
+function drawDebris(d) {
+  let height = 0;
+  c.save(); c.translate(d.x, d.y);
+  if (d.state === "fly") {
+    const k = Math.min(d.flyT / d.flyDur, 1); height = Math.sin(k * Math.PI) * 120;
+    circle(0, height * 0.6, d.r * 0.9, "rgba(0,0,0,0.18)");
+    c.scale(1 + height / 200, 1 + height / 200);
+  } else {
+    ring(0, 0, d.r + 5 + Math.sin(d.t * 2) * 2, "rgba(255,255,255,0.25)", 2);
+    const s = 1 + Math.sin(d.t * 3) * 0.03; c.scale(s, s);
+  }
+  c.rotate(d.rot);
+  const R = d.r;
+  switch (d.kind) {
+    case "leaf": {
+      const p = [];
+      for (let i = 0; i < 12; i++) { const a = i / 12 * TAU, r = R * (1 - 0.45 * Math.abs(Math.sin(a))); p.push(Math.cos(a) * r * 1.2, Math.sin(a) * r * 0.75); }
+      poly(p, d.tint); c.strokeStyle = OUT; c.lineWidth = 2; c.stroke();
+      line(-R * 1.3, 0, R * 1.1, 0, "rgba(0,0,0,0.35)", 2); break;
+    }
+    case "sock":
+      line(-4, -12, -4, 6, OUT, 14); line(-4, 6, 8, 8, OUT, 14);
+      line(-4, -12, -4, 6, "#f2f2f2", 9); line(-4, 6, 8, 8, "#f2f2f2", 9);
+      line(-9, -10, 1, -10, "#e63946", 3, "butt"); line(-9, -6, 1, -6, "#3a86ff", 3, "butt"); break;
+    case "duck":
+      ellipse(0, 2, 14, 11, OUT); ellipse(0, 2, 11.5, 8.5, "#ffd23f");
+      circle(6, -6, 8.5, OUT); circle(6, -6, 6.5, "#ffd23f");
+      poly([11, -7, 18, -5, 11, -3], "#ff8c1a"); circle(7, -8, 1.6, OUT); break;
+    case "pizza":
+      poly([-15, -10, 15, -10, 0, 16], OUT); poly([-11, -8, 11, -8, 0, 11], "#ffd166");
+      line(-14, -10, 14, -10, "#c98b3b", 5); for (const [x, y] of [[-4, -3], [4, -2], [0, 4]]) circle(x, y, 2.8, "#c0392b"); break;
+    case "toupee":
+      ellipse(0, 0, 17, 11, OUT); ellipse(0, 0, 14, 8.5, "#5b3a1e");
+      for (let i = 0; i < 5; i++) line(-10 + i * 5, -6, -7 + i * 5, 6, "#3d2512", 2); break;
+    case "phone":
+      rect(-8, -13, 16, 26, OUT); rect(-6, -11, 12, 20, `hsl(215,90%,${62 + 10 * Math.sin(d.t * 5)}%)`); circle(0, 11, 1.5, "#888"); break;
+    case "ball": {
+      circle(0, 0, R + 3, OUT);
+      const cols = ["#e63946", "#fff", "#3a86ff", "#fff", "#ffd23f", "#fff"];
+      for (let i = 0; i < 6; i++) { c.beginPath(); c.moveTo(0, 0); c.arc(0, 0, R, i / 6 * TAU, (i + 1) / 6 * TAU); c.closePath(); c.fillStyle = cols[i]; c.fill(); }
+      circle(0, 0, 4, "#fff"); break;
+    }
+    case "bandaid":
+      rect(-12, -5, 24, 10, OUT); rect(-10, -3.5, 20, 7, "#e8b48a"); rect(-4, -3.5, 8, 7, "#c9956a"); circle(0, 0, 1.5, "#7a8b2a"); break;
+    case "frog":
+      for (const s of [-1, 1]) { ellipse(s * 9, 7, 6, 4, OUT); ellipse(s * 9, 7, 4.5, 3, "#4c9e2f"); }
+      ellipse(0, 0, 12, 11, OUT); ellipse(0, 0, 10, 9, "#6cc24a");
+      for (const s of [-1, 1]) { circle(s * 5, -8, 4.5, OUT); circle(s * 5, -8, 3.5, "#fff"); circle(s * 5, -9, 1.6, OUT); } break;
+    case "dale":
+      circle(0, 0, 50, OUT); circle(0, 0, 46, "#ff7eb6"); circle(0, 0, 26, OUT); circle(0, 0, 23, "#3fc1e0");
+      line(0, -44, 10, -66, OUT, 14); line(0, -44, 10, -66, "#ff7eb6", 9);
+      circle(12, -70, 10, OUT); circle(12, -70, 7.5, "#ff7eb6"); poly([18, -72, 28, -66, 18, -66], OUT);
+      circle(0, 4, 22, OUT); circle(0, 4, 19, "#f08a6b");
+      for (const s of [-1, 1]) { line(s * 14, -4, s * 40, -12, OUT, 11); line(s * 14, -4, s * 40, -12, "#f08a6b", 7); }
+      circle(0, -20, 13, OUT); circle(0, -20, 10.5, "#f08a6b"); line(-7, -22, 7, -22, OUT, 4);
+      rect(-18, 14, 36, 10, "#2a9d8f"); break;
+  }
+  c.restore();
+  if (d.kind === "dale") {
+    if (d.grumpy > 0) text("HEY!!", d.x, d.y - 46, 34, "#ff5a5a", { align: "center" });
+    else for (let i = 0; i < 3; i++) {
+      const ph = (d.t * 0.6 + i / 3) % 1;
+      text("z", d.x + 20 + ph * 30, d.y - 30 - ph * 40, 16 + ph * 14, `rgba(255,255,255,${1 - ph})`, { outline: 0, font: BODY });
+    }
+  }
+}
+
+// --------------------------------------------------------------- Pool Boy --
+const SKIN = "#e8b48a";
+function drawBoy(b) {
+  const hx = b.head.x - b.x, hy = b.head.y - b.y, dx = Math.cos(b.ang), dy = Math.sin(b.ang);
+  const full = b.contents.length >= CAPACITY;
+  c.save(); c.translate(b.x, b.y);
+  line(dx * 16, dy * 16, hx, hy, OUT, 9); line(dx * 16, dy * 16, hx, hy, "#d0d4dc", 5);
+  circle(hx, hy, NET_R + 4, OUT); circle(hx, hy, NET_R, "rgba(255,255,255,0.22)");
+  for (let i = -2; i <= 2; i++) {
+    const o = i * 11, w = Math.sqrt(Math.max(NET_R * NET_R - o * o, 0));
+    line(hx + o, hy - w, hx + o, hy + w, "rgba(255,255,255,0.35)", 1.5, "butt");
+    line(hx - w, hy + o, hx + w, hy + o, "rgba(255,255,255,0.35)", 1.5, "butt");
+  }
+  b.contents.forEach((col, i) => { const a = i / CAPACITY * TAU + 0.5; circle(hx + Math.cos(a) * 13, hy + Math.sin(a) * 13, 7, OUT); circle(hx + Math.cos(a) * 13, hy + Math.sin(a) * 13, 5.5, col); });
+  ring(hx, hy, NET_R + 1, full && (yard.t % 0.4) < 0.2 ? "#ff5a5a" : "#ffd23f", 4);
+  circle(4, 6, 24, "rgba(0,0,0,0.2)");
+  c.rotate(b.ang + Math.PI / 2);
+  const step = b.moving ? Math.sin(b.walk) * 7 : 0;
+  for (const s of [-1, 1]) { ellipse(s * 9, 10 + step * s, 6, 9, OUT); ellipse(s * 9, 10 + step * s, 4.5, 7.5, "#ff7eb6"); }
+  ellipse(0, 4, 18, 10, OUT); ellipse(0, 4, 15.5, 8, "#2a9d8f");
+  ellipse(0, -2, 22, 13, OUT); ellipse(0, -2, 19, 10.5, SKIN);
+  ellipse(0, -1, 13, 9, "#ff9f1c");
+  for (const s of [-1, 1]) { line(s * 17, -4, s * 5, -20, OUT, 9); line(s * 17, -4, s * 5, -20, SKIN, 5.5); }
+  circle(0, -4, 12, OUT); circle(0, -4, 10, SKIN);
+  poly([-10, -2, -9, -10, 0, -15, 10, -10, 12, -1, 4, -7, -3, -4], "#ffd23f");
+  line(-8, -12, 8, -12, OUT, 4);
+  if (b.stun > 0) for (let i = 0; i < 3; i++) { const a = yard.t * 6 + i * TAU / 3; circle(Math.cos(a) * 18, -4 + Math.sin(a) * 18, 3.5, "#ffd23f"); }
+  c.restore();
+  if (full) text("NET FULL!", b.x, b.y - 34, 20, "#ff5a5a", { align: "center", outline: 6 });
+}
+
+// ---------------------------------------------------------------- popups --
+let popups = [];
+function popup(s, x, y, size, col, rise = 60, dur = 0.9) {
+  x = clamp(x, 110, W - 110);
+  popups.push({ s, x, y, size, col, rise, dur, age: 0, rot: rand(-0.12, 0.12) });
+}
+function drawPopups(dt) {
+  popups = popups.filter(p => (p.age += dt) < p.dur);
+  for (const p of popups) {
+    const u = Math.min(p.age / 0.15, 1), back = 1 + 2.7 * Math.pow(u - 1, 3) + 1.7 * Math.pow(u - 1, 2);
+    const sc = 0.4 + 0.6 * back, e = 1 - Math.pow(1 - p.age / p.dur, 3);
+    c.save(); c.globalAlpha = p.age > p.dur * 0.65 ? 1 - (p.age - p.dur * 0.65) / (p.dur * 0.35) : 1;
+    c.translate(p.x, p.y - p.rise * e); c.rotate(p.rot); c.scale(sc, sc);
+    text(p.s, 0, 0, p.size, p.col, { align: "center", base: "middle" });
+    c.restore();
+  }
+}
+
+// ============================================================= GAME STATE ==
+const REMARKS = ["Don't forget the deep end, sweetie!", "I pay you in exposure, you know.", "Love the shorts. Very... brave.",
+  "My husband built this pool himself.", "That net is older than you are.", "Are you skimming or swimming?", "Hustle! The book club arrives at 4!"];
+const RANKS = [
+  [150, "Pool Legend", "“Marry me. Or at least come back Tuesday.”"],
+  [100, "Employee of the Month", "“Sparkling! Have a lemonade.”"],
+  [60, "Adequate Pool Boy", "“It's... wet. That's something.”"],
+  [30, "Pool Disappointment", "“I found a sock in my lemonade.”"],
+  [0, "Please Return the Net", "“Who even hired you?”"],
+];
+
+let state = "title", G = null, items = [], lastFrame = performance.now();
+const boy = { x: 360, y: LOOP.y + LH, ang: -Math.PI / 2, head: { x: 360, y: 900 }, contents: [], moving: false, walk: 0, stun: 0 };
+const touch = { active: false, id: null, x: 0, y: 0 };
+const keys = new Set();
+
+function say(s, sec = 3) { yard.bubble = s; yard.bubbleTime = sec; if (G) G.remarkCd = rand(9, 14); }
+
+function newTitle() {
+  state = "title"; G = null; popups = []; ripples = []; musicVolume(0.5);
+  items = ["leaf", "leaf", "duck", "ball", "sock", "dale"].map(k => {
+    const d = makeDebris(k), p = randPoolPoint(70); d.x = p.x; d.y = p.y;
+    const a = Math.random() * TAU; d.vx = Math.cos(a) * 20; d.vy = Math.sin(a) * 20; return d;
+  });
+  boy.contents = []; boy.stun = 0;
+  yard.bubble = "Pool's not gonna skim itself!"; yard.bubbleTime = 1e9; yard.kidX = -1; yard.binGlow = 0; yard.wind = { x: 0, y: 0 };
+}
+function newGame() {
+  state = "play"; popups = []; ripples = []; items = []; musicVolume(0.5);
+  G = { time: 0, tips: 0, scooped: 0, frogs: 0, naps: 0, ext: 0, stun: 0, contents: [],
+    spawnCd: 1.5, gustCd: 16, gustTime: 0, gustDir: { x: 1, y: 0 }, gustLeaves: 0, wind: { x: 0, y: 0 },
+    frogCd: 22, dale: false, walkTo: null, kidTime: 0, remarkCd: 5, grossOver: 0, finishedAt: 0, fired: false, newBest: false };
+  boy.x = 360; boy.y = LOOP.y + LH; boy.contents = []; boy.ang = -Math.PI / 2;
+  for (let i = 0; i < 4; i++) { const d = makeDebris("leaf"), p = randPoolPoint(); d.x = p.x; d.y = p.y; items.push(d); }
+  say("Pool's filthy, hon. Get skimming!", 3.5);
+  if (navigator.wakeLock) navigator.wakeLock.request("screen").catch(() => {});
+}
+
+const netReach = ext => 26 + ext * (MAX_REACH - 26);
+const gross = () => items.reduce((g, d) => g + (d.state === "float" && !d.leaving ? d.info.gross : 0), 0);
+
+function onLanded(d) {
+  if (d.leaving) { d.dead = true; return; }
+  ripples.push({ x: d.x, y: d.y, age: 0 });
+  play("splash", rand(0.8, 1.3) * (d.kind === "dale" ? 0.7 : 1), d.kind === "leaf" ? 0.5 : 1);
+}
+
+// Where to point: a finger, the bot, or nothing.
+function controlTarget() {
+  if (AUTOPLAY) {
+    if (G.contents.length >= CAPACITY) return BIN;
+    let best = null, bd = Infinity; const s0 = loopS(boy);
+    for (const d of items) {
+      if (d.state !== "float" || d.kind === "dale" || d.dead || d.leaving) continue;
+      let ds = Math.abs(loopS(d) - s0); ds = Math.min(ds, PER - ds);
+      if (ds < bd) { bd = ds; best = d; }
+    }
+    return best;
+  }
+  if (touch.active) return touch;
+  return G.walkTo;   // a tap on the deck or trash keeps him walking after the finger lifts
+}
+
+function updatePlay(dt) {
+  G.time += dt;
+  const speed = SPEED * (G.ext > 0.2 ? 0.5 : 1);
+  let extTarget = 0, moved = false;
+  if (G.stun > 0) G.stun -= dt;
+  const kx = (keys.has("ArrowRight") || keys.has("d") ? 1 : 0) - (keys.has("ArrowLeft") || keys.has("a") ? 1 : 0);
+  const ky = (keys.has("ArrowDown") || keys.has("s") ? 1 : 0) - (keys.has("ArrowUp") || keys.has("w") ? 1 : 0);
+  const target = controlTarget();
+  if (G.stun > 0) {
+    // stunned: no movement, net drops
+  } else if (kx || ky || keys.has(" ")) {
+    // Keyboard: free movement on the deck, Space reaches.
+    const l = Math.hypot(kx, ky) || 1;
+    boy.x += kx / l * speed * dt; boy.y += ky / l * speed * dt; moved = !!(kx || ky);
+    boy.x = clamp(boy.x, DECK.x + PLAYER_R, DECK.x + DECK.w - PLAYER_R); boy.y = clamp(boy.y, DECK.y + PLAYER_R, DECK.y + DECK.h - PLAYER_R);
+    if (inRect(boy, LOOP)) { const p = loopPoint(loopS(boy)); boy.x = p.x; boy.y = p.y; }
+    if (keys.has(" ")) extTarget = 1;
+  } else if (target) {
+    // Touch: walk around the edge toward the spot, then reach the net to it.
+    let s = loopS(boy), ds = loopS(target) - s;
+    ds = ((ds % PER) + PER * 1.5) % PER - PER / 2;
+    if (Math.abs(ds) > 2) { s += Math.sign(ds) * Math.min(Math.abs(ds), speed * dt); moved = true; }
+    const p = loopPoint(s); boy.x = p.x; boy.y = p.y;
+    if (target === G.walkTo && Math.abs(ds) <= 2) G.walkTo = null;
+    const inWater = inRect(target, rectGrow(POOL, 6));
+    if (inWater && Math.abs(ds) < 16) {
+      const need = dist(poolPoint(boy), target);
+      extTarget = Math.max(0.06, clamp((need + (AUTOPLAY ? 8 : 0) - 26) / (MAX_REACH - 26), 0, 1));
+    }
+  }
+  G.ext += clamp(extTarget - G.ext, -RETRACT_RATE * dt, EXTEND_RATE * dt);
+  if (G.stun > 0) G.ext = 0;
+  const dir = intoPool(boy), want = Math.atan2(dir.y, dir.x);
+  let da = want - boy.ang; da = Math.atan2(Math.sin(da), Math.cos(da));
+  boy.ang += da * Math.min(dt * 14, 1);
+  const rim = poolPoint(boy), r = netReach(G.ext);
+  boy.head = { x: rim.x + Math.cos(boy.ang) * r, y: rim.y + Math.sin(boy.ang) * r };
+  boy.moving = moved; if (moved) boy.walk += dt * 12; boy.stun = G.stun;
+  boy.contents = G.contents.map(k => KINDS[k].color);
+
+  // Dump.
+  if (G.contents.length && dist(boy, BIN) < DUMP_RADIUS) {
+    const full = G.contents.length >= CAPACITY; G.contents = [];
+    play("dump", rand(0.9, 1.1)); popup("DUMPED!", BIN.x + 90, BIN.y - 60, 36, "#fff");
+    if (full) { G.tips += FULL_NET_BONUS; popup(`FULL NET +$${FULL_NET_BONUS}`, BIN.x + 120, BIN.y - 110, 30, "#7ee081"); }
+  }
+  yard.binGlow = G.contents.length >= CAPACITY ? 1 : 0;
+  yard.canopyAlpha += clamp((dist(boy, TREE) < 200 ? 0.35 : 1) - yard.canopyAlpha, -dt * 4, dt * 4);
+
+  spawns(dt); wind(dt);
+  for (const d of items) updateDebris(d, dt, G.wind, onLanded);
+  netCatch();
+  items = items.filter(d => !d.dead);
+
+  const g = gross();
+  if (g >= GROSS_MAX) {
+    if (G.grossOver === 0) say("This pool is DISGUSTING! Fix it NOW!", GROSS_GRACE);
+    G.grossOver += dt;
+    if (G.grossOver >= GROSS_GRACE) return finish(true);
+  } else G.grossOver = Math.max(G.grossOver - dt * 2, 0);
+  if ((G.remarkCd -= dt) <= 0) say(pick(REMARKS));
+  if (G.time >= SHIFT_LENGTH) finish(false);
+}
+
+function spawns(dt) {
+  if ((G.spawnCd -= dt) <= 0) {
+    G.spawnCd = (3.0 + (1.3 - 3.0) * (G.time / SHIFT_LENGTH)) * rand(0.7, 1.3);
+    if (Math.random() < 0.5) spawnLeaf(); else spawnJunk();
+  }
+  if ((G.frogCd -= dt) <= 0) {
+    G.frogCd = rand(18, 28);
+    const f = makeDebris("frog"), side = Math.random() < 0.5;
+    throwDebris(f, { x: side ? 10 : W - 10, y: rand(400, 1000) }, randPoolPoint(60), 0.9); items.push(f);
+    play("ribbit"); say("Is that a FROG?! Get it out!", 2.5);
+  }
+  if (!G.dale && G.time > 14) {
+    G.dale = true; const d = makeDebris("dale");
+    throwDebris(d, { x: POOL.x + POOL.w - 90, y: POOL.y + POOL.h + 40 }, { x: POOL.x + POOL.w / 2 + 40, y: POOL.y + POOL.h / 2 + 120 }, 1.2);
+    items.unshift(d); say("Dale! Don't splash the help!", 3.5);
+  }
+  if ((G.kidTime = Math.max(G.kidTime - dt, 0)) === 0) yard.kidX = -1;
+}
+function spawnLeaf() {
+  const d = makeDebris("leaf");
+  const to = Math.hypot(G.wind.x, G.wind.y) > 20 ? randPoolPoint(30) : { x: POOL.x + rand(20, 300), y: POOL.y + rand(20, 340) };
+  throwDebris(d, { x: TREE.x + rand(-40, 60), y: TREE.y + rand(-30, 50) }, to, 1.5); items.push(d);
+}
+function spawnJunk() {
+  const kinds = Object.keys(KINDS).filter(k => KINDS[k].weight > 0 && k !== "leaf");
+  let roll = Math.random() * kinds.reduce((s, k) => s + KINDS[k].weight, 0), kind = "sock";
+  for (const k of kinds) { roll -= KINDS[k].weight; if (roll <= 0) { kind = k; break; } }
+  const x = rand(200, 540); yard.kidX = x; G.kidTime = 0.9;
+  const d = makeDebris(kind); throwDebris(d, { x, y: FENCE_H - 10 }, randPoolPoint(30), 0.9); items.push(d);
+}
+function wind(dt) {
+  if ((G.gustCd -= dt) <= 0 && G.gustTime <= 0) {
+    G.gustCd = rand(14, 22); G.gustTime = 3; G.gustLeaves = 5;
+    const sx = Math.random() < 0.5 ? 1 : -1, sy = rand(-0.3, 0.3), l = Math.hypot(sx, sy);
+    G.gustDir = { x: sx / l, y: sy / l }; play("gust", 1, 0.8); say("Ooh, it's getting WINDY!", 2);
+  }
+  if (G.gustTime > 0) {
+    G.gustTime -= dt; const env = Math.sin(clamp(G.gustTime / 3, 0, 1) * Math.PI);
+    G.wind = { x: G.gustDir.x * 70 * env, y: G.gustDir.y * 70 * env };
+    if (G.gustLeaves > 0 && Math.random() < dt * 3) { G.gustLeaves--; spawnLeaf(); }
+  } else G.wind = { x: 0, y: 0 };
+  yard.wind = G.wind;
+}
+function netCatch() {
+  const h = boy.head;
+  if (G.ext <= 0.001 || !inRect(h, POOL)) return;
+  for (const d of items) {
+    if (d.state !== "float" || d.dead || d.leaving) continue;
+    if (dist(h, d) > NET_R + d.r * (d.kind === "dale" ? 0.8 : 0.6)) continue;
+    if (d.kind === "dale") { if (G.stun <= 0) pokeDale(d); return; }
+    if (d.kind === "frog") {
+      G.tips += d.info.tips; G.frogs++; play("ribbit", 1.2);
+      popup(`FROG RESCUED! +$${d.info.tips}`, d.x, d.y - 40, 30, "#ffd23f");
+      d.leaving = true; throwDebris(d, d, { x: Math.random() < 0.5 ? -20 : W + 20, y: rand(300, 1100) }, 0.8);
+    } else if (G.contents.length < CAPACITY) {
+      G.tips += d.info.tips; G.scooped++; G.contents.push(d.kind); d.dead = true;
+      play("scoop", rand(0.85, 1.3)); ripples.push({ x: d.x, y: d.y, age: 0 });
+      popup(`+$${d.info.tips} ${d.info.name}`, d.x, d.y - 36, 26, "#7ee081");
+      if (d.kind === "toupee") say("Is that... GARY'S toupee?!");
+      else if (d.kind === "phone") say("My PHONE! I've been looking for that!");
+      else if (d.kind === "bandaid") say("Don't tell me where that came from.");
+    }
+  }
+}
+function pokeDale(d) {
+  G.naps++; G.tips = Math.max(G.tips - DALE_PENALTY, 0); G.stun = 0.7; G.ext = 0;
+  d.grumpy = 1; d.spin = 4;
+  const l = dist(d, boy) || 1; d.vx += (d.x - boy.x) / l * 60; d.vy += (d.y - boy.y) / l * 60;
+  play("hey"); play("splash", 0.8, 0.6);
+  popup(`-$${DALE_PENALTY} DON'T POKE DALE`, d.x, d.y - 80, 28, "#ff5a5a");
+  say("Leave Dale alone, he's on VACATION!");
+  if (navigator.vibrate) navigator.vibrate(60);
+}
+function finish(fired) {
+  state = "results"; yard.bubbleTime = 0; G.fired = fired; G.finishedAt = performance.now(); G.ext = 0;
+  play(fired ? "womp" : "whistle"); musicVolume(0.15);
+  G.rank = RANKS.find(r => G.tips >= r[0]);
+  if (!AUTOPLAY && G.tips > bestTips) { bestTips = G.tips; store.set("best", bestTips); G.newBest = true; }
+  if (AUTOPLAY) window.__result = { fired, tips: G.tips, scooped: G.scooped, frogs: G.frogs, naps: G.naps, time: G.time };
+}
+
+function updateTitle(dt) {
+  for (const d of items) updateDebris(d, dt, { x: 0, y: 0 });
+  const t = yard.t, s = LW + LH + LW / 2 + Math.sin(t * 0.4) * (LW / 2 - 10);
+  const p = loopPoint(s); boy.x = p.x; boy.y = p.y; boy.moving = Math.abs(Math.cos(t * 0.4)) > 0.2; if (boy.moving) boy.walk += dt * 12;
+  boy.ang = -Math.PI / 2;
+  const r = 40 + 60 * (0.5 + 0.5 * Math.sin(t * 1.7)), rim = poolPoint(boy);
+  boy.head = { x: rim.x, y: rim.y - r };
+}
+
+// ================================================================== DRAW ==
+const BTN = { quit: [652, 14, 56, 56], toTitle: [240, 1010, 240, 70] };
+const inBtn = (b, x, y) => x >= b[0] && x <= b[0] + b[2] && y >= b[1] && y <= b[1] + b[3];
+function button(b, label, size = 32) {
+  rrect(b[0], b[1] + 4, b[2], b[3], 14, "rgba(0,0,0,0.3)"); rrect(b[0] - 3, b[1] - 3, b[2] + 6, b[3] + 6, 16, OUT);
+  rrect(b[0], b[1], b[2], b[3], 13, "#fff6d5");
+  text(label, b[0] + b[2] / 2, b[1] + b[3] / 2 + 2, size, OUT, { align: "center", base: "middle", outline: 0 });
+}
+function drawHud() {
+  text(`TIPS $${G.tips}`, 20, 60, 42, "#7ee081");
+  const left = Math.max(SHIFT_LENGTH - G.time, 0);
+  text(`${Math.floor(left / 60)}:${String(Math.floor(left % 60)).padStart(2, "0")}`, 470, 60, 44, "#fff", { align: "center" });
+  if (state === "play") button(BTN.quit, "✕", 28);
+  text("GROSS-O-METER", 20, 104, 20, "#fff", { font: BODY, outline: 6 });
+  const k = clamp(gross() / GROSS_MAX, 0, 1);
+  rect(200, 88, 500, 20, OUT);
+  const col = k < 0.5 ? mixC([126, 224, 129], [255, 210, 63], k * 2) : mixC([255, 210, 63], [255, 59, 59], k * 2 - 1);
+  rect(203, 91, 494 * k, 14, G.grossOver > 0 && (yard.t % 0.3) < 0.15 ? "#fff" : col);
+  if (G.time < 14) {
+    c.save(); c.globalAlpha = clamp(14 - G.time, 0, 1);
+    ["Touch junk in the pool to scoop it", "Full net? Tap the TRASH can", "Don't poke Uncle Dale!"].forEach((s, i) =>
+      text(s, 20, 1150 + i * 40, 26, "#fff", { font: BODY, outline: 7 }));
+    c.restore();
+  }
+}
+const mixC = (a, b, t) => `rgb(${a.map((v, i) => Math.round(v + (b[i] - v) * t)).join(",")})`;
+
+function drawResults() {
+  const a = Math.min((performance.now() - G.finishedAt) / 400, 1);
+  c.save(); c.globalAlpha = a;
+  rect(0, 0, W, H, "rgba(13,31,51,0.8)");
+  const cx = W / 2;
+  text(G.fired ? "YOU'RE FIRED!" : "SHIFT OVER!", cx, 270, 72, G.fired ? "#ff5a5a" : "#fff", { align: "center" });
+  text(`$${G.tips} in tips`, cx, 390, 84, "#7ee081", { align: "center" });
+  const rank = G.fired ? "Terminated for Gross Negligence" : G.rank[1];
+  text(rank, cx, 470, rank.length > 22 ? 34 : 44, "#ffd23f", { align: "center" });
+  text(G.newBest ? "NEW BEST!" : `Best: $${bestTips}`, cx, 530, 30, "#fff", { align: "center", font: BODY, outline: 7 });
+  [`Junk scooped: ${G.scooped}`, `Frogs rescued: ${G.frogs}`, `Naps ruined: ${G.naps}`].forEach((s, i) =>
+    text(s, cx, 600 + i * 44, 30, "#fff", { align: "center", font: BODY, outline: 7 }));
+  text("Mrs. Henderson says:", cx, 780, 28, "#fff6d5", { align: "center" });
+  wrap(G.fired ? "“I've seen cleaner swamps.”" : G.rank[2], 600, 28, BODY).forEach((l, i) =>
+    text(l, cx, 822 + i * 38, 28, "#fff6d5", { align: "center", font: BODY, outline: 7 }));
+  if (performance.now() - G.finishedAt > 1000) {
+    text("TAP FOR ANOTHER SHIFT", cx, 960, 46, "#7ee081", { align: "center" });
+    button(BTN.toTitle, "Title screen", 30);
+  }
+  c.restore();
+}
+
+function drawTitleText() {
+  const t = yard.t;
+  c.save(); c.translate(W / 2, 470); c.rotate(Math.sin(t * 2.6) * 0.03);
+  text("POOL", 0, -70, 150, "#ffd23f", { align: "center", outline: 26 });
+  text("BOY", 0, 80, 150, "#ffd23f", { align: "center", outline: 26 });
+  c.restore();
+  ["Skim the pool. Dodge Uncle Dale.", "Survive Mrs. Henderson."].forEach((s, i) =>
+    text(s, W / 2, 640 + i * 42, 32, "#fff", { align: "center", font: BODY, outline: 8 }));
+  c.save(); c.globalAlpha = 0.55 + 0.45 * Math.abs(Math.sin(t * 3));
+  text("TAP TO START", W / 2, 800, 64, "#7ee081", { align: "center" });
+  c.restore();
+  if (bestTips > 0) text(`Best shift: $${bestTips}`, 20, 60, 34, "#fff");
+  ["Touch junk in the pool to scoop it", "Full net? Tap the TRASH can"].forEach((s, i) =>
+    text(s, 20, 1170 + i * 40, 26, "#fff", { font: BODY, outline: 7 }));
+}
+
+function frame(now) {
+  const dt = Math.min((now - lastFrame) / 1000, 0.05); lastFrame = now;
+  yard.t += dt; yard.bubbleTime = Math.max(yard.bubbleTime - dt, 0);
+  ripples = ripples.filter(r => (r.age += dt) < 1.2);
+  if (state === "play") updatePlay(dt);
+  else if (state === "title") updateTitle(dt);
+  else for (const d of items) updateDebris(d, dt, { x: 0, y: 0 });
+
+  c.setTransform(1, 0, 0, 1, 0, 0); c.fillStyle = "#3f7a34"; c.fillRect(0, 0, cv.width, cv.height);
+  const k = view.s * view.dpr; c.setTransform(k, 0, 0, k, view.ox * view.dpr, view.oy * view.dpr);
+  c.save(); c.beginPath(); c.rect(0, 0, W, H); c.clip();
+  drawGround();
+  for (const d of items) drawDebris(d);
+  drawBoy(boy);
+  if (state === "play" && touch.active && inRect(touch, POOL)) ring(touch.x, touch.y, 22, "rgba(255,255,255,0.6)", 3);
+  drawTop();
+  if (state === "title") drawTitleText(); else drawHud();
+  drawPopups(dt);
+  if (state === "results") drawResults();
+  c.restore();
+  requestAnimationFrame(frame);
+}
+
+// ================================================================= INPUT ==
+function toLogical(e) {
+  const r = cv.getBoundingClientRect();
+  return { x: (e.clientX - r.left - view.ox) / view.s, y: (e.clientY - r.top - view.oy) / view.s };
+}
+cv.addEventListener("pointerdown", e => {
+  e.preventDefault(); cv.focus();
+  if (state !== "play" || touch.active) return;
+  const p = toLogical(e);
+  if (inBtn(BTN.quit, p.x, p.y)) return;
+  G.walkTo = null;
+  touch.active = true; touch.id = e.pointerId; touch.x = p.x; touch.y = p.y;
+  try { cv.setPointerCapture(e.pointerId); } catch (err) {}
+}, { passive: false });
+cv.addEventListener("pointermove", e => {
+  if (touch.active && e.pointerId === touch.id) { const p = toLogical(e); touch.x = p.x; touch.y = p.y; }
+});
+function endTouch(e) { if (e.pointerId === touch.id) touch.active = false; }
+cv.addEventListener("pointercancel", endTouch);
+cv.addEventListener("pointerup", e => {
+  e.preventDefault(); unlockAudio(); endTouch(e);
+  const p = toLogical(e);
+  if (state === "play") {
+    if (inBtn(BTN.quit, p.x, p.y)) newTitle();
+    else if (!inRect(p, rectGrow(POOL, 6))) G.walkTo = p;
+    return;
+  }
+  if (state === "title") { newGame(); return; }
+  if (state === "results" && performance.now() - G.finishedAt > 1000) { if (inBtn(BTN.toTitle, p.x, p.y)) newTitle(); else newGame(); }
+}, { passive: false });
+for (const ev of ["touchstart", "touchmove", "touchend", "gesturestart", "dblclick", "contextmenu"]) {
+  cv.addEventListener(ev, e => { e.preventDefault(); if (ev === "touchend") unlockAudio(); }, { passive: false });
+}
+window.addEventListener("keydown", e => {
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  if (k === "Escape") { if (state !== "title") newTitle(); return; }
+  if ([" ", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(k)) e.preventDefault();
+  keys.add(k);
+  if (e.repeat) return;
+  if (k === " " || k === "Enter") {
+    unlockAudio();
+    if (state === "title") newGame();
+    else if (state === "results" && performance.now() - G.finishedAt > 1000) newGame();
+  }
+});
+window.addEventListener("keyup", e => keys.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key));
+window.addEventListener("blur", () => { keys.clear(); touch.active = false; });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && actx) actx.suspend().catch(() => {});
+  else if (!document.hidden && actx) actx.resume().catch(() => {});
+});
+
+// ================================================================== BOOT ==
+resize();
+newTitle();
+if (AUTOPLAY) newGame();
+const fontsReady = document.fonts ? Promise.race([document.fonts.load('40px "Lilita One"'), new Promise(r => setTimeout(r, 1500))]) : Promise.resolve();
+fontsReady.then(() => requestAnimationFrame(frame));
+</script>
