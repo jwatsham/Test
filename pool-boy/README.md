@@ -40,7 +40,8 @@ thing at a time (basics, leaf season, frogs, Uncle Dale, wind, a pool party, a s
 gross limit), each followed by a gentler day to settle in, then endless days keep scaling. All tips go into a wallet for the Pool Supply store:
 Bigger Net, Fast Flip-Flops, Longer Pole, Clipboard (queue size), and Pool Chemicals
 (junk counts as less gross). Day data is `DAYS` and upgrades are `UPG` in the script.
-Progress saves in the browser's local storage.
+Progress saves in the browser's local storage. NEW GAME on the Job Board erases it (after a
+confirmation).
 
 **Placeholder ads.** An `Ads` object with the same shape as a real SDK: a bottom banner
 slot (the game shrinks to fit above it), interstitials only between shifts (not in the first

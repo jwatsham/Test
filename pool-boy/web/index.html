@@ -272,6 +272,7 @@ const FONT = {
   "/": "....#/...#./...#./..#../.#.../.#.../#....", "(": ".#/#./#./#./#./#./.#", ")": "#./.#/.#/.#/.#/.#/#.",
   "&": ".##../#..#./#.#../.#.../#.#.#/#..#./.##.#", "*": "...../#.#.#/.###./#####/.###./#.#.#",
   "•": "./../.###./#####/#####/#####/.###.",
+  "▲": "...../..#../.###./#####", "▼": "...../#####/.###./..#..",
   "✓": "...../....#/...#./#.#../.#.../...../.....",
   "★": "...#.../..###../#######/.#####./..###../.##.##./##...##", "☆": "...#.../..#.#../###.###/.#...#./..#.#../.#.#.#./##...##", "▶": "#.../##../###./####/###./##../#...",
 };
@@ -725,6 +726,14 @@ let botOn = AUTOPLAY;   // test bot (also drives the balance simulator)
 function persist() { if (!botOn) store.set("save", SAVE); }
 const stat = id => { const u = UPG.find(u => u.id === id); return u.vals[SAVE.up[id] || 0]; };
 const capacity = () => (G ? G.cap : stat("net"));
+// Wipes all progress: days, stars, wallet, upgrades and best score.
+function resetSave() {
+  for (const k of Object.keys(SAVE)) delete SAVE[k];
+  Object.assign(SAVE, { unlocked: 1, stars: [], wallet: 0, up: { net: 0, shoes: 0, pole: 0, clip: 0, chem: 0 }, best: 0, shifts: 0, v: 2 });
+  try { localStorage.removeItem("pb_best"); } catch (e) {}
+  persist();
+  Ads._since = 0;
+}
 
 // ==================================================================== ADS ==
 // Placeholder ad layer with the same shape as a real SDK, so swapping in AdMob
@@ -782,7 +791,7 @@ const QUOTES = {
   1: "“It's... clean enough. Barely.”", 0: "“I found a sock in my lemonade.”", fired: "“I've seen cleaner swamps.”",
 };
 
-let state = "title", G = null, items = [], lastFrame = performance.now(), boardTop = 0, introDay = 0, busy = false;
+let state = "title", G = null, items = [], lastFrame = performance.now(), boardTop = 0, introDay = 0, busy = false, confirmReset = false;
 const boy = { x: 360, y: LOOP.y + LH, ang: -Math.PI / 2, head: { x: 360, y: 900 }, contents: [], moving: false, walk: 0, stun: 0 };
 const keys = new Set();
 
@@ -790,7 +799,7 @@ function say(s, sec = 3) { yard.bubble = s; yard.typed = 0; yard.bubbleTime = se
 
 function resetYard() { popups = []; ripples = []; items = []; boy.contents = []; boy.stun = 0; yard.kidX = -1; yard.binGlow = 0; yard.wind = { x: 0, y: 0 }; yard.bubbleTime = 0; }
 function toTitle() { state = "title"; G = null; resetYard(); musicVolume(0.5); Ads.banner(true); }
-function toBoard() { state = "board"; G = null; resetYard(); musicVolume(0.5); Ads.banner(true); boardTop = Math.max(0, SAVE.unlocked - 8); }
+function toBoard() { confirmReset = false; state = "board"; G = null; resetYard(); musicVolume(0.5); Ads.banner(true); boardTop = Math.max(0, SAVE.unlocked - 8); }
 function toStore() { state = "store"; Ads.banner(true); }
 function toIntro(day) {
   introDay = day; state = "intro"; G = null; resetYard(); Ads.banner(true);
@@ -1235,6 +1244,18 @@ function drawBoard() {
   if (top + rows < total) button("▼", 210, yb, 24, 18, () => boardTop += rows - 1);
   button("POOL SUPPLY STORE", 6, yb, 140, 22, toStore, { color: C.yellow });
   button("TITLE", 6, yb + 28, 60, 18, toTitle);
+  button("NEW GAME", 72, yb + 28, 74, 18, () => { confirmReset = true; });
+  if (confirmReset) {
+    hits.length = 0;   // only the dialog's buttons respond while it's open
+    R(0, 0, RW, RH, "rgba(8,8,24,0.6)");
+    win(24, 140, 192, 104);
+    txt("START A NEW GAME?", RW / 2, 150, C.yellow, { align: "center" });
+    txt("This erases all your progress:", RW / 2, 166, WHITE, { align: "center" });
+    txt("days, stars, wallet and upgrades.", RW / 2, 177, WHITE, { align: "center" });
+    txt("This can't be undone.", RW / 2, 192, C.red, { align: "center" });
+    button("ERASE", 40, 214, 70, 20, () => { resetSave(); toTitle(); play("womp", 1.2, 0.5); }, { color: C.red, ink: WHITE });
+    button("CANCEL", 130, 214, 70, 20, () => { confirmReset = false; }, { color: C.green });
+  }
 }
 
 function drawStore() {
