@@ -6,6 +6,10 @@ snakes, a banana, a desk lamp) and you crack their spines straight **on the beat
 
 ![Crack](docs/screenshots/crack.png)
 
+> This repo also holds a second, separate Godot game: **[Pool Boy](pool-boy/README.md)** in
+> `pool-boy/`. Open its own `pool-boy/project.godot`. Godot ignores nested project folders,
+> so the two games don't interfere.
+
 ## Running it
 
 1. Install **Godot 4.4+** (standard build, not .NET): https://godotengine.org/download
