@@ -29,8 +29,7 @@ and every sound effect) is synthesized at startup.
 - He never reaches through Uncle Dale. He waits for Dale to drift off, and gives up on an
   item after 2.5 seconds.
 
- Arrow keys and
-Space work on desktop. Add `#autoplay` to the URL to watch the bot play. Like the Rhythm
+Arrow keys and Space work on desktop. Add `#autoplay` to the URL to watch the bot play. Like the Rhythm
 Chiropractor web build, it's written as an HTML fragment for publishing as a Claude
 artifact.
 
